@@ -130,7 +130,8 @@ deploy:
   prerelease: true
   body: "View [Release Notes](${TAG_URI}/NEWS.md#${ANCHOR}) for flux-core ${TRAVIS_TAG}"
   api_key:
-    secure: I7ckZ7Ei9oLIe8WZ8OH3EgZz81IFCIekx+v/+g3sJa6q15URlfZhVVFtiUpsJRktHcb39AflWZiEIX+HdUZyXtuTt9IES1XBIKH7x/zUL0x6f1DZKAhBx9ktYzdO/M+SpmDUg6RYxcdjVmSHZ9u935TDo104U+dY0990ZSFrpco=
+    #secure: I7ckZ7Ei9oLIe8WZ8OH3EgZz81IFCIekx+v/+g3sJa6q15URlfZhVVFtiUpsJRktHcb39AflWZiEIX+HdUZyXtuTt9IES1XBIKH7x/zUL0x6f1DZKAhBx9ktYzdO/M+SpmDUg6RYxcdjVmSHZ9u935TDo104U+dY0990ZSFrpco=
+    secure: "eeE2M6KgCZ+AHGS7n+yEziLcJgyqOK5lnhbDvn5NbjSY8CMArolSnd1vitaJeVSGlR/Ncl6qYPNbwcofd/tDXDguQXur2FrIxmuoKmq/fXSfCub7Ml0ioN78FS2U7F9FBiS7FNbAMc1RCjPn2L0S0G0GIRCRBNYe4zBKcXhVbQo="
   on:
     # Only deploy from first job in build matrix
     condition: $TRAVIS_JOB_NUMBER = $TRAVIS_BUILD_NUMBER.1
