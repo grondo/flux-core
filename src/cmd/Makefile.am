@@ -72,6 +72,7 @@ fluxcmd_PROGRAMS = \
 	flux-module \
 	flux-comms \
 	flux-kvs \
+	flux-mock-imp \
 	flux-start \
 	flux-jstat
 
