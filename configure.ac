@@ -260,6 +260,7 @@ AC_CONFIG_FILES( \
   src/common/libpmi/Makefile \
   src/common/libflux/Makefile \
   src/common/libsubprocess/Makefile \
+  src/common/libimp/Makefile \
   src/common/libcompat/Makefile \
   src/common/liboptparse/Makefile \
   src/bindings/Makefile \
