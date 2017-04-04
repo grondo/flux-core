@@ -76,6 +76,8 @@ libutil_la_SOURCES = \
 	stdlog.h \
 	stdlog.c \
 	oom.h \
+	zsigcert.h \
+	zsigcert.c \
 	lru_cache.h \
 	lru_cache.c
 
