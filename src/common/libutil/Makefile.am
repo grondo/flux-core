@@ -100,6 +100,7 @@ TESTS = test_nodeset.t \
 	test_lru_cache.t \
 	test_unlink.t \
 	test_cleanup.t \
+	test_zsigcert.t \
 	test_blobref.t
 
 test_ldadd = \
@@ -192,3 +193,7 @@ test_unlink_t_LDADD = $(test_ldadd) $(JANSSON_LIBS)
 test_cleanup_t_SOURCES = test/cleanup.c
 test_cleanup_t_CPPFLAGS = $(test_cppflags) $(JANSSON_CFLAGS)
 test_cleanup_t_LDADD = $(test_ldadd) $(JANSSON_LIBS)
+
+test_zsigcert_t_SOURCES = test/zsigcert.c
+test_zsigcert_t_CPPFLAGS = $(test_cppflags) $(SODIUM_CFLAGS)
+test_zsigcert_t_LDADD = $(test_ldadd) $(SODIUM_LIBS)
