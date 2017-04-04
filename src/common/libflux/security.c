@@ -355,47 +355,22 @@ static char * ctime_iso8601_now (char *buf, size_t sz)
     return (buf);
 }
 
-static zcert_t *zcert_curve_new (flux_sec_t *c)
-{
-    zcert_t *new;
-    char sec[41];
-    char pub[41];
-    uint8_t s[32];
-    uint8_t p[32];
-
-    if (zmq_curve_keypair (pub, sec) < 0) {
-        if (errno == ENOTSUP)
-            seterrstr (c,
-                "No CURVE support in libzmq (not compiled with libsodium?)");
-        else
-            seterrstr (c,
-                "Unknown error generating CURVE keypair");
-        return NULL;
-    }
-
-    if (!zmq_z85_decode (s, sec) || !zmq_z85_decode (p, pub)) {
-        seterrstr (c, "zcert_curve_new: Failed to decode keys");
-        return NULL;
-    }
-
-    if (!(new = zcert_new_from (p, s)))
-        oom ();
-
-    return new;
-}
-
 static int gencurve (flux_sec_t *c, const char *role)
 {
-    char *path = NULL, *priv = NULL;;
+    char path[PATH_MAX];
+    char priv[PATH_MAX];
     zcert_t *cert = NULL;
     char buf[64];
     struct stat sb;
     int rc = -1;
 
-    if (asprintf (&path, "%s/%s", c->curve_dir, role) < 0)
-        oom ();
-    if (asprintf (&priv, "%s/%s_private", c->curve_dir, role) < 0)
-        oom ();
+    if (!zsys_has_curve ()) {
+        seterrstr (c, "No CURVE support in libzmq");
+        errno = EINVAL;
+        goto done;
+    }
+    snprintf (path, sizeof (path), "%s/%s", c->curve_dir, role);
+    snprintf (priv, sizeof (priv), "%s/%s_secret", c->curve_dir, role);
     if ((c->typemask & FLUX_SEC_KEYGEN_FORCE)) {
         (void)unlink (path);
         (void)unlink (priv);
@@ -410,10 +385,10 @@ static int gencurve (flux_sec_t *c, const char *role)
         errno = EEXIST;
         goto done;
     }
-
-    if (!(cert = zcert_curve_new (c)))
-        goto done; /* error message set in zcert_curve_new() */
-
+    if (!(cert = zcert_new ())) {
+        seterrstr (c, "could not generate curve keys");
+        goto done;
+    }
     zcert_set_meta (cert, "time", "%s", ctime_iso8601_now (buf, sizeof (buf)));
     zcert_set_meta (cert, "role", "%s", role);
     if ((c->typemask & FLUX_SEC_VERBOSE)) {
@@ -426,12 +401,7 @@ static int gencurve (flux_sec_t *c, const char *role)
     }
     rc = 0;
 done:
-    if (cert)
-        zcert_destroy (&cert);
-    if (path)
-        free (path);
-    if (priv)
-        free (priv);
+    zcert_destroy (&cert);
     return rc;
 }
 
