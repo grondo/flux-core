@@ -178,8 +178,8 @@ void test_keygen (void)
         BAIL_OUT ("flux_sec_create failed");
     ok (flux_sec_keygen (sec) == 0,
             "flux_sec_keygen CURVE works");
-    ok (unlink_recursive (path) == 6,
-            "unlinked 6 file/dir");
+    ok (unlink_recursive (path) == 8,
+            "unlinked 8 file/dir");
     flux_sec_destroy (sec);
 
     /* CURVE overwrite
@@ -195,8 +195,8 @@ void test_keygen (void)
     errno = 0;
     ok (flux_sec_keygen (sec) < 0 && errno == EEXIST,
             "flux_sec_keygen CURVE-overwrite fails with EEXIST");
-    ok (unlink_recursive (path) == 6,
-            "unlinked 6 file/dir");
+    ok (unlink_recursive (path) == 8,
+            "unlinked 8 file/dir");
     flux_sec_destroy (sec);
 
     /* Same with FORCE
@@ -212,8 +212,8 @@ void test_keygen (void)
     errno = 0;
     ok (flux_sec_keygen (sec) == 0,
             "flux_sec_keygen (force) CURVE-overwrite works");
-    ok (unlink_recursive (path) == 6,
-            "unlinked 6 file/dir");
+    ok (unlink_recursive (path) == 8,
+            "unlinked 8 file/dir");
     flux_sec_destroy (sec);
 
     /* PLAIN overwrite

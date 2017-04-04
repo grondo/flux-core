@@ -42,6 +42,7 @@
 #include "src/common/libutil/oom.h"
 #include "src/common/libutil/xzmalloc.h"
 #include "src/common/libutil/base64.h"
+#include "src/common/libutil/zsigcert.h"
 
 
 #define FLUX_ZAP_DOMAIN "flux"
@@ -163,6 +164,8 @@ int flux_sec_keygen (flux_sec_t *c)
         if (gencurve (c, "client") < 0)
             goto done;
         if (gencurve (c, "server") < 0)
+            goto done;
+        if (gencurve (c, "signature") < 0)
             goto done;
     }
     if ((c->typemask & FLUX_SEC_TYPE_PLAIN)) {
@@ -359,7 +362,6 @@ static int gencurve (flux_sec_t *c, const char *role)
 {
     char path[PATH_MAX];
     char priv[PATH_MAX];
-    zcert_t *cert = NULL;
     char buf[64];
     struct stat sb;
     int rc = -1;
@@ -385,23 +387,47 @@ static int gencurve (flux_sec_t *c, const char *role)
         errno = EEXIST;
         goto done;
     }
-    if (!(cert = zcert_new ())) {
-        seterrstr (c, "could not generate curve keys");
-        goto done;
-    }
-    zcert_set_meta (cert, "time", "%s", ctime_iso8601_now (buf, sizeof (buf)));
-    zcert_set_meta (cert, "role", "%s", role);
-    if ((c->typemask & FLUX_SEC_VERBOSE)) {
-        printf ("Saving %s\n", path);
-        printf ("Saving %s\n", priv);
-    }
-    if (zcert_save (cert, path) < 0) {
-        seterrstr (c, "zcert_save %s: %s", path, strerror (errno));
-        goto done;
+    if (!strcmp (role, "signature")) {
+        zsigcert_t *cert = NULL;
+        if (!(cert = zsigcert_new ())) {
+            seterrstr (c, "could not generate curve keys");
+            goto done;
+        }
+        zsigcert_set_meta (cert, "time", "%s",
+                        ctime_iso8601_now (buf, sizeof (buf)));
+        zsigcert_set_meta (cert, "role", "%s", role);
+        if ((c->typemask & FLUX_SEC_VERBOSE)) {
+            printf ("Saving %s\n", path);
+            printf ("Saving %s\n", priv);
+        }
+        if (zsigcert_save (cert, path) < 0) {
+            seterrstr (c, "zsigcert_save %s: %s", path, strerror (errno));
+            zsigcert_destroy (&cert);
+            goto done;
+        }
+        zsigcert_destroy (&cert);
+    } else {
+        zcert_t *cert = NULL;
+        if (!(cert = zcert_new ())) {
+            seterrstr (c, "could not generate curve keys");
+            goto done;
+        }
+        zcert_set_meta (cert, "time", "%s",
+                        ctime_iso8601_now (buf, sizeof (buf)));
+        zcert_set_meta (cert, "role", "%s", role);
+        if ((c->typemask & FLUX_SEC_VERBOSE)) {
+            printf ("Saving %s\n", path);
+            printf ("Saving %s\n", priv);
+        }
+        if (zcert_save (cert, path) < 0) {
+            seterrstr (c, "zcert_save %s: %s", path, strerror (errno));
+            zcert_destroy (&cert);
+            goto done;
+        }
+        zcert_destroy (&cert);
     }
     rc = 0;
 done:
-    zcert_destroy (&cert);
     return rc;
 }
 
