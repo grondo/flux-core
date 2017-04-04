@@ -19,7 +19,7 @@ libflux_internal_la_LIBADD = \
 	$(builddir)/libcompat/libcompat.la \
 	$(builddir)/libjson-c/libjson-c.la \
 	$(LIBMUNGE) $(JANSSON_LIBS) $(ZMQ_LIBS) $(LIBPTHREAD) $(LIBUTIL) \
-	$(LIBDL) $(LIBRT)
+	$(LIBDL) $(LIBRT) $(SODIUM_LIBS)
 libflux_internal_la_LDFLAGS = $(san_ld_zdef_flag)
 
 lib_LTLIBRARIES = libflux-core.la libflux-optparse.la
