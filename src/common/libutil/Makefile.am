@@ -195,5 +195,5 @@ test_cleanup_t_CPPFLAGS = $(test_cppflags) $(JANSSON_CFLAGS)
 test_cleanup_t_LDADD = $(test_ldadd) $(JANSSON_LIBS)
 
 test_zsigcert_t_SOURCES = test/zsigcert.c
-test_zsigcert_t_CPPFLAGS = $(test_cppflags) $(SODIUM_CFLAGS)
-test_zsigcert_t_LDADD = $(test_ldadd) $(SODIUM_LIBS)
+test_zsigcert_t_CPPFLAGS = $(test_cppflags) $(SODIUM_CFLAGS) $(JANSSON_CFLAGS)
+test_zsigcert_t_LDADD = $(test_ldadd) $(SODIUM_LIBS) $(JANSSON_LIBS)

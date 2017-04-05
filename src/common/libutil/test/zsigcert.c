@@ -1,4 +1,5 @@
 #include <czmq.h>
+#include <jansson.h>
 #include "src/common/libtap/tap.h"
 #include "src/common/libutil/xzmalloc.h"
 #include "zsigcert.h"
@@ -45,7 +46,7 @@ int main (int argc, char **argv)
     ok (sig != NULL,
         "zsigcert_sign worked");
     diag ("Blob: %s", blob);
-    diag ("Sig: %s", sig ? sig : "NULL");
+    diag ("Sign: %s", sig ? sig : "NULL");
     ok (sig && zsigcert_verify (cert, sig, blob, strlen (blob)) == 0,
         "zsigcert_verify works");
     char *save_sig = xstrdup (sig);
@@ -55,9 +56,33 @@ int main (int argc, char **argv)
     ok (sig != NULL,
         "zsigcert_sign worked again");
     diag ("Blob: %s", blob2);
-    diag ("Sig: %s", sig ? sig : "NULL");
+    diag ("Sign: %s", sig ? sig : "NULL");
     ok (sig && zsigcert_verify (cert, sig, blob2, strlen (blob2)) == 0,
         "zsigcert_verify on second blob works");
+
+    //  Sign/verify JSON
+    json_t *json = json_pack ("{s:i s:s}", "foo", 42, "bar", "mitzvah");
+    if (!json)
+        BAIL_OUT ("couldn't create json object");
+    char *s = json_dumps (json, JSON_COMPACT);
+    char *ss = NULL;
+    ok (zsigcert_sign_json (cert, s, &ss) == 0 && ss != NULL,
+        "zsigcert_sign_json worked");
+    diag ("JSON: %s", s);
+    diag ("Sign: %s", ss);
+
+    ok (zsigcert_verify_json (cert, ss) == 0,
+        "zsigcert_verify_json verified signed-json");
+    ok (zsigcert_verify_json (cert, s) < 0,
+        "zsigcert_verify_json failed to verify unsigned signed-json");
+    ss[2] = 'x';
+    diag ("Chng: %s", ss);
+    ok (zsigcert_verify_json (cert, ss) < 0,
+        "zsigcert_verify_json failed to verify tampered signed-json");
+
+    free (ss);
+    free (s);
+    json_decref (json);
 
     //  Make sure wrong signature fails
     ok (zsigcert_verify (cert, save_sig, blob2, strlen (blob2)) < 0,
