@@ -30,6 +30,24 @@
 #include "src/common/libutil/readall.h"
 #include "src/common/libutil/zsigcert.h"
 
+static struct optparse_option sign_opts[] =  {
+    { .name = "json", .key = 'j', .has_arg = 0,
+      .usage = "Sign a JSON object on stdin",
+    },
+    OPTPARSE_TABLE_END
+};
+
+static struct optparse_option verify_opts[] =  {
+    { .name = "json", .key = 'j', .has_arg = 0,
+      .usage = "Verify a JSON object on stdin",
+    },
+    { .name = "signature", .key = 's', .has_arg = 1,
+      .usage = "Specify signature for blob on stdin",
+    },
+    OPTPARSE_TABLE_END
+};
+
+
 /* Note: flux keygen creates:
  *  $HOME/.flux/curve/signature         (contains only public key)
  *  $HOME/.flux/curve/signature_secret  (contains public, private keypair)
@@ -56,7 +74,6 @@ static int internal_curve_sign (optparse_t *p, int ac, char *av[])
     uint8_t *buf;
     int len;
     zsigcert_t *cert;
-    const char *sig;
 
     n = optparse_option_index (p);
     if (n != ac) {
@@ -67,10 +84,26 @@ static int internal_curve_sign (optparse_t *p, int ac, char *av[])
 
     if ((len = read_all (STDIN_FILENO, &buf)) < 0)
         log_err_exit ("could not ingest stdin");
-    if (!(sig = zsigcert_sign (cert, buf, len)))
-        log_err_exit ("could not sign stdin");
-    printf ("%s\n", sig);
+
+    if (optparse_hasopt (p, "json")) {
+        char *json_str = xasprintf ("%.*s", len, buf);
+        char *json_signed;
+
+        if (zsigcert_sign_json (cert, json_str, &json_signed) < 0)
+            log_err_exit ("could not json-sign stdin");
+        printf ("%s\n", json_signed);
+        free (json_signed);
+        free (json_str);
+    }
+    else {
+        const char *sig;
+        if (!(sig = zsigcert_sign (cert, buf, len)))
+            log_err_exit ("could not sign stdin");
+        printf ("%s\n", sig);
+    }
+
     free (buf);
+    zsigcert_destroy (&cert);
 
     return (0);
 }
@@ -81,24 +114,38 @@ static int internal_curve_verify (optparse_t *p, int ac, char *av[])
     uint8_t *buf;
     int len;
     zsigcert_t *cert;
-    const char *sig;
     uint32_t userid = geteuid ();
 
     n = optparse_option_index (p);
-    if (n != ac - 1) {
+    if (n != ac || !(optparse_hasopt (p, "json")
+                || optparse_hasopt (p, "signature"))) {
         optparse_print_usage (p);
         exit (1);
     }
-    sig = av[n++];
-    /* add option to override userid */
 
+    /* FIXME add option to override userid */
     cert = load_cert (userid, true);
     if ((len = read_all (STDIN_FILENO, &buf)) < 0)
         log_err_exit ("could not ingest stdin");
-    if (zsigcert_verify (cert, sig, buf, len) < 0)
-        log_msg_exit ("verification failed");
-    printf ("%s\n", "OK");
+
+    if (optparse_hasopt (p, "json")) {
+        char *json_str = xasprintf ("%.*s", len, buf);
+        if (zsigcert_verify_json (cert, json_str) < 0)
+            log_msg_exit ("verification failed");
+        printf ("%s", "OK");
+        free (json_str);
+    }
+    else if (optparse_hasopt (p, "signature")) {
+        const char *sig = optparse_get_str (p, "signature", NULL);
+        if (zsigcert_verify (cert, sig, buf, len) < 0)
+            log_msg_exit ("verification failed");
+        printf ("%s\n", "OK");
+    }
+
+
     free (buf);
+    zsigcert_destroy (&cert);
+
     return (0);
 }
 
@@ -113,18 +160,18 @@ int cmd_curve (optparse_t *p, int ac, char *av[])
 
 static struct optparse_subcommand curve_subcmds[] = {
     { "sign",
-      "",
-      "Sign blob on stdin",
+      "[--json]",
+      "Sign stdin",
       internal_curve_sign,
       0,
-      NULL,
+      sign_opts,
     },
     { "verify",
-      "signature",
-      "Verify signature of blob on stdin",
+      "[--json | --signature=SIG]",
+      "Verify stdin signature",
       internal_curve_verify,
       0,
-      NULL,
+      verify_opts,
     },
     OPTPARSE_SUBCMD_END
 };
