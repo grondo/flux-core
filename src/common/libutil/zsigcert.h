@@ -61,4 +61,12 @@ const char *zsigcert_sign (zsigcert_t *self, const void *buf, size_t len);
 int zsigcert_verify (zsigcert_t *self, const char *sig,
                       const void *buf, size_t len);
 
+/* Valid JSON in, valid JSON out with signature (caller must free).
+ * See https://camlistore.org/doc/json-signing/
+ */
+int zsigcert_sign_json (zsigcert_t *self, const char *json_str,
+                        char **json_signed);
+
+int zsigcert_verify_json (zsigcert_t *self, const char *json_str);
+
 #endif

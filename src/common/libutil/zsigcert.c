@@ -456,6 +456,59 @@ int zsigcert_verify (zsigcert_t *self, const char *s_sig,
     return crypto_sign_verify_detached (sig, buf, len, self->public_key);
 }
 
+int zsigcert_sign_json (zsigcert_t *self, const char *json_str,
+                        char **json_signed)
+{
+    int rc = -1;
+    const char *sig;
+    int len = strlen (json_str);
+    char *buf;
+
+    /* drop any trailing whitespace plus closing bracket */
+    while (len > 0 && isspace(json_str[len - 1]))
+        len--;
+    if (len == 0 || json_str[len - 1] != '}') {
+        errno = EINVAL;
+        goto done;
+    }
+    len--;
+    /* sign truncated json */
+    if (!(sig = zsigcert_sign (self, json_str, len)))
+        goto done;
+    /* append signature */
+    if (asprintf (&buf, "%.*s,\"sig\":\"%s\"}\n", len, json_str, sig) < 0) {
+        errno = ENOMEM;
+        goto done;
+    }
+    *json_signed = buf;
+    rc = 0;
+done:
+    return rc;
+}
+
+int zsigcert_verify_json (zsigcert_t *self, const char *json_str)
+{
+    int len = strlen (json_str);
+    char sig[S_SIGPREFIX_LEN + S_SIGSIZE];
+
+    /* drop any trailing whitespace */
+    while (len > 0 && isspace(json_str[len - 1]))
+        len--;
+    /* isolate truncated json */
+    len -= strlen (",\"sig\":\"\"}");
+    len -= (S_SIGPREFIX_LEN + S_SIGSIZE - 1);
+    if (len < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* extract appended signature */
+    const char *p = json_str + len;
+    p += strlen (",\"sig\":\"");
+    snprintf (sig, sizeof (sig), "%s", p);
+    /* verify signature on truncated json */
+    return zsigcert_verify (self, sig, json_str, len);
+}
+
 /*
  * vi:tabstop=4 shiftwidth=4 expandtab
  */
