@@ -41,13 +41,21 @@ bool zsigcert_eq (zsigcert_t *self, zsigcert_t *compare);
 
 void zsigcert_print (zsigcert_t *self);
 
-/* Sign (buf, len) returning base64 signature.
+
+/* Signatures are of the form:
+ * <algorithm>-<base64 string>
+ *
+ * Example:
+ * ed25519-7sfhxyEuDSQFuVsoUnwp5vONvBYpLfIwhkRHGTFgiviUN5abVyVcWTfqauA2rsgHBnFuUVb8VDqtOmTuIf6nCw==
+ */
+
+/* Sign (buf, len) returning signature.
  * Cert must contain private key.
  * Signature is valid until next call.
  */
 const char *zsigcert_sign (zsigcert_t *self, const void *buf, size_t len);
 
-/* Verify buf with base64 signature
+/* Verify buf with signature
  * Cert must contain public key.
  */
 int zsigcert_verify (zsigcert_t *self, const char *sig,

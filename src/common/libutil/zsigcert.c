@@ -30,8 +30,10 @@
 
 #define S_PUBSIZE ((PUBSIZE * 5 / 4) + 1)
 #define S_SECSIZE ((SECSIZE * 5 / 4) + 1)
-
 #define S_SIGSIZE ((SIGSIZE + 2) * 4 / 3 + 1)
+
+#define S_SIGPREFIX         crypto_sign_PRIMITIVE "-"
+#define S_SIGPREFIX_LEN     (sizeof(S_SIGPREFIX) - 1)
 
 
 //  Structure of our class
@@ -42,7 +44,7 @@ struct zsigcert {
     byte signature [SIGSIZE];
     char public_txt [S_PUBSIZE];
     char secret_txt [S_SECSIZE];
-    char signature_txt [S_SIGSIZE];
+    char signature_txt [S_SIGPREFIX_LEN + S_SIGSIZE];
     zhash_t *metadata;
     zconfig_t *config;
     bool sodium_initialized;
@@ -417,7 +419,8 @@ const char *zsigcert_sign (zsigcert_t *self, const void *buf, size_t len)
         return NULL;
     }
     int dstlen;
-    if (base64_encode_block (self->signature_txt, &dstlen,
+    strcpy (self->signature_txt, S_SIGPREFIX);
+    if (base64_encode_block (self->signature_txt + S_SIGPREFIX_LEN, &dstlen,
                              self->signature, SIGSIZE) < 0) {
         errno = EINVAL;
         return NULL;
@@ -439,13 +442,14 @@ int zsigcert_verify (zsigcert_t *self, const char *s_sig,
         }
         self->sodium_initialized = true;
     }
-    if (strlen (s_sig) != S_SIGSIZE - 1) {
+    if (strlen (s_sig) != S_SIGPREFIX_LEN + S_SIGSIZE - 1) {
         errno = EINVAL;
         return -1;
     }
     byte sig[SIGSIZE];
     int dstlen;
-    if (base64_decode_block (sig, &dstlen, s_sig, strlen (s_sig)) < 0) {
+    if (base64_decode_block (sig, &dstlen, s_sig + S_SIGPREFIX_LEN,
+                                           S_SIGSIZE - 1) < 0) {
         errno = EINVAL;
         return -1;
     }
