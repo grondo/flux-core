@@ -71,4 +71,14 @@ int zsigcert_sign_json (zsigcert_t *self, const char *json_str,
 
 int zsigcert_verify_json (zsigcert_t *self, const char *json_str);
 
+/* Verify JSON object on 'f', returning it in json_str (caller must free).
+ * Position 'f' at the byte following the json object.
+ */
+int zsigcert_verify_json_file (zsigcert_t *self, FILE *f, char **json_str);
+
+/* Sign JSON object on 'f', returning it in json_str (caller must free).
+ * Position 'f' at the byte following the json object.
+ */
+int zsigcert_sign_json_file (zsigcert_t *self, FILE *f, char **json_str);
+
 #endif

@@ -476,7 +476,7 @@ int zsigcert_sign_json (zsigcert_t *self, const char *json_str,
     if (!(sig = zsigcert_sign (self, json_str, len)))
         goto done;
     /* append signature */
-    if (asprintf (&buf, "%.*s,\"sig\":\"%s\"}\n", len, json_str, sig) < 0) {
+    if (asprintf (&buf, "%.*s,\"sig\":\"%s\"}", len, json_str, sig) < 0) {
         errno = ENOMEM;
         goto done;
     }
@@ -507,6 +507,94 @@ int zsigcert_verify_json (zsigcert_t *self, const char *json_str)
     snprintf (sig, sizeof (sig), "%s", p);
     /* verify signature on truncated json */
     return zsigcert_verify (self, sig, json_str, len);
+}
+
+#define CHUNKSIZE 64
+
+static int append_alloc (char **buf, int *len, int *used, char c)
+{
+    if (*used == *len) {
+        (*len) += CHUNKSIZE;
+        char *new = realloc (*buf, *len);
+        if (!new) {
+            errno = ENOMEM;
+            return -1;
+        }
+        *buf = new;
+    }
+    (*buf)[(*used)++] = c;
+    return 0;
+}
+
+static int read_json_object (FILE *f, char **s)
+{
+    char *buf = NULL;
+    int buf_len = 0;
+    int buf_used = 0;
+    int brace_level = 0;
+    int object_count = 0;
+    int c;
+
+    do {
+        if ((c = fgetc (f)) == EOF) {
+            errno = EPROTO;
+            goto error;
+        }
+        if (append_alloc (&buf, &buf_len, &buf_used, c) < 0)
+            goto error;
+        switch (c) {
+            case '{':
+                brace_level++;
+                break;
+            case '}':
+                if (brace_level == 0) {
+                    errno = EPROTO;
+                    goto error;
+                }
+                if (--brace_level == 0)
+                    object_count++;
+                break;
+            default:
+                break;
+        }
+    } while (object_count == 0);
+    if (append_alloc (&buf, &buf_len, &buf_used, '\0') < 0)
+        goto error;
+    *s = buf;
+    return 0;
+error:
+    free (buf);
+    return -1;
+}
+
+int zsigcert_verify_json_file (zsigcert_t *self, FILE *f, char **json_str)
+{
+    char *s = NULL;
+
+    if (read_json_object (f, &s) < 0)
+        goto error;
+    if (zsigcert_verify_json (self, s) < 0)
+        goto error;
+    *json_str = s;
+    return 0;
+error:
+    free (s);
+    return -1;
+}
+
+int zsigcert_sign_json_file (zsigcert_t *self, FILE *f, char **json_str)
+{
+    char *s = NULL;
+
+    if (read_json_object (f, &s) < 0)
+        goto error;
+    if (zsigcert_sign_json (self, s, json_str) < 0)
+        goto error;
+    free (s);
+    return 0;
+error:
+    free (s);
+    return -1;
 }
 
 /*
