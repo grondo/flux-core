@@ -3,6 +3,8 @@
 #ifndef __ZSIGCERT_H_INCLUDED__
 #define __ZSIGCERT_H_INCLUDED__
 
+#include <czmq.h>
+
 typedef struct zsigcert zsigcert_t;
 
 zsigcert_t *zsigcert_new (void);
