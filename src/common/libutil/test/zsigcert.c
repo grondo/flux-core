@@ -68,17 +68,59 @@ int main (int argc, char **argv)
     char *ss = NULL;
     ok (zsigcert_sign_json (cert, s, &ss) == 0 && ss != NULL,
         "zsigcert_sign_json worked");
-    diag ("JSON: %s", s);
-    diag ("Sign: %s", ss);
+    diag ("JSON: '%s'", s);
+    diag ("Sign: '%s'", ss);
 
     ok (zsigcert_verify_json (cert, ss) == 0,
         "zsigcert_verify_json verified signed-json");
     ok (zsigcert_verify_json (cert, s) < 0,
         "zsigcert_verify_json failed to verify unsigned signed-json");
-    ss[2] = 'x';
-    diag ("Chng: %s", ss);
-    ok (zsigcert_verify_json (cert, ss) < 0,
+
+    char *s_tampered = xstrdup (ss);
+    s_tampered[2] = 'x';
+    diag ("Chng: %s", s_tampered);
+    ok (zsigcert_verify_json (cert, s_tampered) < 0,
         "zsigcert_verify_json failed to verify tampered signed-json");
+    free (s_tampered);
+
+    //  Sign/verify JSON on file streams
+    char path[PATH_MAX];
+    int fd;
+    FILE *f;
+    const char *tmp = getenv ("TMPDIR");
+    char *signed_s = NULL;
+    char *parsed_s = NULL;
+    snprintf (path, sizeof (path), "%s/zsigcert.XXXXXX", tmp ? tmp : "/tmp");
+    if ((fd = mkstemp (path)) < 0)
+        BAIL_OUT ("mkstemp failed");
+    if (!(f = fdopen (fd, "w+")))
+        BAIL_OUT ("fdopen on tmp file failed");
+    if (fputs (s, f) == EOF)
+        BAIL_OUT ("failed to write unsigned object to file");
+    rewind (f);
+
+    // sign and replace file
+    ok (zsigcert_sign_json_file (cert, f, &signed_s) == 0 && signed_s != NULL,
+        "zsigcert_sign_json_file worked");
+    rewind (f);
+    if (fputs (signed_s, f) == EOF)
+        BAIL_OUT ("failed to write signed object to file");
+    rewind (f);
+
+    // verify file
+    ok (zsigcert_verify_json_file (cert,  f, &parsed_s) == 0
+        && parsed_s != NULL,
+        "zsigcert_verify_json_file worked");
+
+    diag ("Str1: '%s'", ss);
+    diag ("Str2: '%s'", parsed_s);
+    ok (strcmp (parsed_s, ss) == 0,
+        "zsigcert_verify_json_file returned correct json object");
+    ok (zsigcert_verify_json_file (cert,  f, &parsed_s) < 0,
+        "zsigcert_verify_json_file failed at EOF");
+    fclose (f);
+    unlink (path);
+    free (parsed_s);
 
     free (ss);
     free (s);
