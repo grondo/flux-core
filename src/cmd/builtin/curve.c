@@ -71,8 +71,6 @@ static zsigcert_t *load_cert (uint32_t userid, int pubonly)
 static int internal_curve_sign (optparse_t *p, int ac, char *av[])
 {
     int n;
-    uint8_t *buf;
-    int len;
     zsigcert_t *cert;
 
     n = optparse_option_index (p);
@@ -82,27 +80,28 @@ static int internal_curve_sign (optparse_t *p, int ac, char *av[])
     }
     cert = load_cert (geteuid (), false);
 
-    if ((len = read_all (STDIN_FILENO, &buf)) < 0)
-        log_err_exit ("could not ingest stdin");
 
     if (optparse_hasopt (p, "json")) {
-        char *json_str = xasprintf ("%.*s", len, buf);
         char *json_signed;
 
-        if (zsigcert_sign_json (cert, json_str, &json_signed) < 0)
+        if (zsigcert_sign_json_file (cert, stdin, &json_signed) < 0)
             log_err_exit ("could not json-sign stdin");
         printf ("%s\n", json_signed);
         free (json_signed);
-        free (json_str);
     }
     else {
+        uint8_t *buf;
+        int len;
         const char *sig;
+
+        if ((len = read_all (STDIN_FILENO, &buf)) < 0)
+            log_err_exit ("could not ingest stdin");
         if (!(sig = zsigcert_sign (cert, buf, len)))
             log_err_exit ("could not sign stdin");
         printf ("%s\n", sig);
+        free (buf);
     }
 
-    free (buf);
     zsigcert_destroy (&cert);
 
     return (0);
@@ -111,8 +110,6 @@ static int internal_curve_sign (optparse_t *p, int ac, char *av[])
 static int internal_curve_verify (optparse_t *p, int ac, char *av[])
 {
     int n;
-    uint8_t *buf;
-    int len;
     zsigcert_t *cert;
     uint32_t userid = geteuid ();
 
@@ -125,25 +122,28 @@ static int internal_curve_verify (optparse_t *p, int ac, char *av[])
 
     /* FIXME add option to override userid */
     cert = load_cert (userid, true);
-    if ((len = read_all (STDIN_FILENO, &buf)) < 0)
-        log_err_exit ("could not ingest stdin");
 
     if (optparse_hasopt (p, "json")) {
-        char *json_str = xasprintf ("%.*s", len, buf);
-        if (zsigcert_verify_json (cert, json_str) < 0)
+        char *json_str;
+        if (zsigcert_verify_json_file (cert, stdin, &json_str) < 0)
             log_msg_exit ("verification failed");
-        printf ("%s", "OK");
+        printf ("%s\n", json_str);
         free (json_str);
     }
     else if (optparse_hasopt (p, "signature")) {
-        const char *sig = optparse_get_str (p, "signature", NULL);
+        uint8_t *buf;
+        int len;
+        const char *sig;
+
+        if ((len = read_all (STDIN_FILENO, &buf)) < 0)
+            log_err_exit ("could not ingest stdin");
+        sig = optparse_get_str (p, "signature", NULL);
         if (zsigcert_verify (cert, sig, buf, len) < 0)
             log_msg_exit ("verification failed");
         printf ("%s\n", "OK");
+        free (buf);
     }
 
-
-    free (buf);
     zsigcert_destroy (&cert);
 
     return (0);
