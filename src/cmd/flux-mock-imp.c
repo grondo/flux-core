@@ -26,17 +26,29 @@
 #include "config.h"
 #endif
 #include <stdio.h>
+#include <envz.h>
+#include <argz.h>
+#include <jansson.h>
 #include <flux/optparse.h>
 
 #include "src/common/libutil/log.h"
+#include "src/common/libutil/zsigcert.h"
 
 int cmd_version (optparse_t *p, int argc, char **argv);
+int cmd_run (optparse_t *p, int argc, char **argv);
 
 static struct optparse_subcommand subcommands[] = {
     { "version",
       NULL,
       "Print IMP version to stdout.",
       cmd_version,
+      0,
+      NULL
+    },
+    { "run",
+      NULL,
+      "Run command described by signed credential on stdin",
+      cmd_run,
       0,
       NULL
     },
@@ -108,5 +120,367 @@ int cmd_version (optparse_t *p, int argc, char **argv)
 }
 
 /*
- * vi:tabstop=4 shiftwidth=4 expandtab
+ *  Permanently drop any privileges and become user described by
+ *   struct passwd entry `pw`.
+ */
+static int switch_user (struct passwd *pw)
+{
+    /* Initialize groups from /etc/group */
+    if (initgroups (pw->pw_name, pw->pw_gid) < 0)
+        log_msg_exit ("initgroups");
+
+    /* Set saved, effective, and real gid/uids */
+    if (setresgid (pw->pw_gid, pw->pw_gid, pw->pw_gid) < 0)
+        log_msg_exit ("setregid");
+    if (setresuid (pw->pw_uid, pw->pw_uid, pw->pw_uid) < 0)
+        log_msg_exit ("setreuid");
+
+    /* Verify we can't restore privilege */
+    if (setreuid (-1, 0) == 0)
+        log_msg_exit ("drop privileges failed");
+
+    return (0);
+}
+
+static char **expand_argz (char *argz, size_t argz_len)
+{
+    size_t len;
+    char **argv;
+    len = argz_count (argz, argz_len) + 1;
+    argv = malloc (len * sizeof (char *));
+    argz_extract (argz, argz_len, argv);
+    return (argv);
+}
+
+/*
+ *  Return array in `req` under key `name` as an argz object.
+ */
+static int json_get_argz (json_t *req, const char *name,
+    char **argzp, size_t *argz_lenp)
+{
+    json_t *o, *value;
+    size_t index;
+    char *argz = NULL;
+    size_t argz_len = 0;
+
+    *argzp = NULL;
+    *argz_lenp = 0;
+
+    if (!(o = json_object_get (req, name)))
+        return (-1);
+
+    if (!json_is_array (o))
+        return (-1);
+
+    json_array_foreach (o, index, value) {
+        const char *arg = json_string_value (value);
+        if ((arg == NULL) || (argz_add (&argz, &argz_len, arg) != 0))
+            goto err;
+    }
+    *argzp = argz;
+    *argz_lenp = argz_len;
+    return (0);
+err:
+    free (argz);
+    return (-1);
+}
+
+
+/*
+ *  Return dictionary in `req` under key `name` as an envz object.
+ */
+static int json_get_envz (json_t *req, const char *name,
+    char **envzp, size_t *envz_lenp)
+{
+    json_t *o, *value;
+    const char *key = NULL;
+    char *envz = NULL;
+    size_t envz_len = 0;
+
+    *envzp = NULL;
+    *envz_lenp = 0;
+
+    if (!(o = json_object_get (req, name)))
+        return (-1);
+
+    json_object_foreach (o, key, value) {
+        const char *val = json_string_value (value);
+        if ((val == NULL) || (envz_add (&envz, &envz_len, key, val) != 0))
+            goto err;
+    }
+
+    *envzp = envz;
+    *envz_lenp = envz_len;
+    return (0);
+err:
+    free (envz);
+    return (-1);
+}
+
+/*
+ *  Exec cmdline described in `req` as UID `uid`.
+ */
+static int exec_request_as_user (json_t *req, uid_t uid)
+{
+    struct passwd *pw;
+    json_t *o;
+    const char *cwd = NULL;
+    char *argz = NULL;
+    size_t argz_len = 0;
+    char *envz = NULL;
+    size_t envz_len = 0;
+    char **argv = NULL;
+    char **env = NULL;
+
+    /* Move to safe path */
+    if (chdir ("/") < 0)
+        log_msg_exit ("chdir ('/')");
+
+    if (!(pw = getpwuid (uid)))
+        log_msg_exit ("no passwd entry for UID %ju", (uintmax_t) uid);
+
+    if ((getuid () != uid) && switch_user (pw) < 0)
+        log_msg_exit ("failed to switch to UID %ju\n", (uintmax_t) uid);
+
+    if (!(o = json_object_get (req, "cwd")) || !(cwd = json_string_value (o)))
+        cwd = pw->pw_dir;
+
+    if (chdir (cwd) < 0)
+        log_msg_exit ("chdir (%s)", cwd);
+
+    log_msg ("chdir ('%s')", cwd);
+
+    if (json_get_argz (req, "cmdline", &argz, &argz_len) < 0)
+        log_msg_exit ("failed to get cmdline from request");
+
+    if (json_get_envz (req, "env", &envz, &envz_len) < 0)
+        log_msg_exit ("failed to get cmdline from request");
+
+    /* Propagate FLUX_URI for child process */
+    if (envz_add (&envz, &envz_len, "FLUX_URI", getenv ("FLUX_URI")));
+
+    envz_strip (&envz, &envz_len);
+
+    argv = expand_argz (argz, argz_len);
+    env = expand_argz (envz, envz_len);
+
+    log_msg ("calling execvp(%s)", argv[0]);
+    execvpe (argv[0], argv, env);
+    fprintf (stderr, "%s: %s", argv[0], strerror (errno));
+    if (errno == EPERM || errno == EACCES)
+        exit (126);
+    exit (127);
+}
+
+
+/*
+ *  Load cert for userid. Lifted from zsigcert.c
+ */
+static zsigcert_t *load_cert (uint32_t userid, int pubonly)
+{
+    char path[PATH_MAX];
+    struct passwd *pw;
+    zsigcert_t *cert;
+
+    if (!(pw = getpwuid (userid)))
+        log_msg_exit ("Could not look up userid '%"PRIu32 "' in /etc/passwd",
+                      userid);
+    snprintf (path, sizeof (path), "%s/.flux/curve/signature%s",
+              pw->pw_dir, pubonly ? "" : "_secret");
+    if (!(cert = zsigcert_load (path)))
+        log_msg_exit ("failed to load %s", path);
+    return cert;
+}
+
+struct cmd_request {
+    uid_t euid;
+    uid_t guest;
+    uid_t owner;
+    json_t *J;
+    json_t *R;
+};
+
+/*
+ *  Get "userid" member of JSON object `o`, stored in `uidp`.
+ */
+static int get_userid (json_t *o, uid_t *uidp)
+{
+    json_int_t uid;
+    json_t *userid;
+
+    if (uidp == NULL)
+        return (-1);
+
+    if (!(userid = json_object_get (o, "userid"))) {
+        log_msg ("`userid` not found in JSON input");
+        return (-1);
+    }
+
+    if ((uid = json_integer_value (userid)) < 0) {
+        log_err ("Invalid `userid` in JSON input");
+        return (-1);
+    }
+
+    *uidp = (uid_t) uid;
+
+    return (0);
+}
+
+/*
+ *  Verify and parse JSON object on file `fp` with zsigcert `zs`.
+ *
+ *  Returns parsed json_t object or NULL on error with error structure `ep`
+ *   filled out.
+ */
+static json_t * zs_verify_loadf (zsigcert_t *zs, FILE *fp, json_error_t *ep)
+{
+    char *json_str;
+    json_t *ret = NULL;
+    if (zsigcert_verify_json_file (zs, fp, &json_str) < 0) {
+        if (ep) {
+            ep->line = 0;
+            ep->column = 0;
+            strncpy (ep->text, "JSON signature verification failed",
+                     JSON_ERROR_TEXT_LENGTH);
+        }
+        return (NULL);
+    }
+    ret = json_loads (json_str, 0, ep);
+
+    free (json_str);
+    return (ret);
+}
+
+/*
+ *  Read and verify signed JSON blob on file `fp` for UID uid.
+ */
+static json_t *zcert_json_verify_loadf (uid_t uid, FILE *fp)
+{
+    json_t *ret;
+    json_error_t e;
+    zsigcert_t *zs = load_cert (uid, 1);
+
+    if (zs == NULL) {
+        log_err ("Failed to load public cert for UID %ju", (uintmax_t) uid);
+        return (NULL);
+    }
+
+    if (!(ret = zs_verify_loadf (zs, fp, &e)))
+        log_err ("JSON input: %d:%d: %s", e.line, e.column, e.text);
+    zsigcert_destroy (&zs);
+
+    return (ret);
+}
+
+
+/*
+ *  Placeholder validation check. Ensure that R.J matches J.sig.
+ */
+static int cmd_request_validate (struct cmd_request *cmd)
+{
+    json_t *o;
+    const char *sig = NULL;
+    const char *sigR = NULL;
+
+    if (!(o = json_object_get (cmd->R, "J"))
+        || !(sigR = json_string_value (o))) {
+        log_err ("Unable to get field J from R");
+        return (-1);
+    }
+    if (!(o = json_object_get (cmd->J, "sig"))
+        || !(sig = json_string_value (o))) {
+        return (-1);
+    }
+    if (strcmp (sigR, sig) != 0)
+        return (-1);
+    return (0);
+}
+
+static int cmd_initialize_credentials (struct cmd_request *cmd)
+{
+    uid_t ruid, euid, suid;
+
+    if (getresuid (&ruid, &euid, &suid) < 0)
+        return (-1);
+
+    cmd->owner = ruid;
+    cmd->euid = euid;
+    cmd->guest = (uid_t) -1;
+
+    return (0);
+}
+
+/*
+ *  Exec a command, described on stdin by two JSON objects: R, J.
+ *
+ *  If the current process is running with EUID == 0, then run
+ *  command as userid specified in R, but only if J was signed by
+ *  this user.
+ *
+ *  J must immediately follow R, separated only by whitespace.
+ *
+ *  Rough content rules for R, J:
+ *
+ *  # jcr-version 0.6
+ *  # R:
+ *  {
+ *     "userid": 1..,
+ *     "J":      string,
+ *     signature,
+ *  }
+ *
+ *  # J:
+ *  {
+ *     cmdline,
+ *     environment,
+ *     ?cwd,
+ *     signature,
+ *  }
+ *
+ *  cmdline "cmdline" [ *: string ]
+ *  environment "env" { *: env_var ]
+ *  env_var { /.* /: any }
+ *  cwd "cwd" string
+ *  signature "sig" string
+ */
+int cmd_run (optparse_t *p, int argc, char **argv)
+{
+    struct cmd_request cmd;
+    memset (&cmd, 0, sizeof (cmd));
+
+    if (cmd_initialize_credentials (&cmd) < 0)
+        log_msg_exit ("failed to get current process credentials");
+
+    log_msg ("euid = %ju, owner (real uid) is %ju",
+        (uintmax_t) cmd.euid, (uintmax_t) cmd.owner);
+
+    if (cmd.euid != 0)
+        log_msg ("Running in unprivileged mode...");
+
+    if (!(cmd.R = zcert_json_verify_loadf (cmd.owner, stdin)))
+        log_msg_exit ("Unable to process owner request on stdin");
+
+    if (get_userid (cmd.R, &cmd.guest) < 0)
+        log_msg_exit ("No userid member in JSON input");
+
+    if (cmd.guest == 0)
+        log_msg_exit ("Cowardly refusing to run with with guest UID 0");
+
+    log_msg ("Executing as guest UID %ju", (uintmax_t) cmd.guest);
+
+    if (!(cmd.J = zcert_json_verify_loadf (cmd.guest, stdin)))
+        log_msg_exit ("Unable to process guest request on stdin");
+
+    log_msg ("Verified authenticity of req from %ju", (uintmax_t) cmd.guest);
+
+    if (cmd_request_validate (&cmd) < 0)
+        log_msg_exit ("invalid R for J");
+
+    exec_request_as_user (cmd.J, cmd.guest);
+    /* NORETURN */
+    return (-1);
+}
+
+/*
+ * vi: tabstop=4 shiftwidth=4 expandtab
  */
