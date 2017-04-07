@@ -540,6 +540,9 @@ static int read_json_object (FILE *f, char **s)
             errno = EPROTO;
             goto error;
         }
+        /* Skip leading whitespace */
+        if (brace_level == 0 && isspace (c))
+            continue;
         if (append_alloc (&buf, &buf_len, &buf_used, c) < 0)
             goto error;
         switch (c) {
