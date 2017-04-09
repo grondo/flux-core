@@ -39,6 +39,7 @@
 #include "src/common/libcompat/compat.h"
 
 #include "src/common/libutil/shortjson.h"
+#include "src/common/libutil/zsigcert.h"
 #include "src/common/libutil/base64_json.h"
 #include "src/modules/libkz/kz.h"
 #include "src/common/libsubprocess/zio.h"
@@ -450,6 +451,77 @@ static int l_flux_index (lua_State *L)
     return 1;
 }
 
+/*
+ *  Load cert for userid. Lifted from zsigcert.c
+ */
+static zsigcert_t *load_cert (uint32_t userid)
+{
+    char path[PATH_MAX];
+    struct passwd *pw;
+    zsigcert_t *cert;
+
+    if (!(pw = getpwuid (userid))) {
+        return NULL;
+    }
+    snprintf (path, sizeof (path),
+              "%s/.flux/curve/signature_secret", pw->pw_dir);
+
+    if (!(cert = zsigcert_load (path))) {
+        return NULL;
+    }
+    return cert;
+}
+
+
+int flux_json_request_signed (flux_t *h, bool sign, uint32_t nodeid,
+                              uint32_t matchtag,
+                              const char *topic, json_object *in)
+{
+    flux_msg_t *msg = NULL;
+    int rc = -1;
+    int flags = 0;
+
+    if (!topic) {
+        errno = EINVAL;
+        goto done;
+    }
+    if (!(msg = flux_msg_create (FLUX_MSGTYPE_REQUEST)))
+        goto done;
+    if (nodeid == FLUX_NODEID_UPSTREAM) {
+        flags |= FLUX_MSGFLAG_UPSTREAM;
+        if (flux_get_rank (h, &nodeid) < 0)
+            goto done;
+    }
+    if (flux_msg_set_nodeid (msg, nodeid, flags) < 0)
+        goto done;
+    if (flux_msg_set_matchtag (msg, matchtag) < 0)
+        goto done;
+    if (flux_msg_set_topic (msg, topic) < 0)
+        goto done;
+    if (sign) {
+        int rc;
+        char *s;
+        zsigcert_t *z = load_cert (getuid());
+        rc = zsigcert_sign_json (z, Jtostr (in), &s);
+        zsigcert_destroy (&z);
+        if (rc < 0)
+            goto done;
+        rc = flux_msg_set_json (msg, s);
+        free (s);
+        if (rc < 0)
+            goto done;
+    }
+    else if (flux_msg_set_json (msg, in ? Jtostr (in) : NULL) < 0)
+        goto done;
+    if (flux_msg_enable_route (msg) < 0)
+        goto done;
+    rc = flux_send (h, msg, 0);
+done:
+    flux_msg_destroy (msg);
+    return rc;
+}
+
+
 static int l_flux_send (lua_State *L)
 {
     int rc;
@@ -459,6 +531,7 @@ static int l_flux_send (lua_State *L)
     json_object *o;
     uint32_t nodeid = FLUX_NODEID_ANY;
     uint32_t matchtag;
+    bool sign = false;
 
     if (lua_value_to_json (L, 3, &o) < 0)
         return lua_pusherror (L, "JSON conversion error");
@@ -469,11 +542,14 @@ static int l_flux_send (lua_State *L)
     if (nargs >= 3)
         nodeid = lua_tointeger (L, 4);
 
+    if (nargs >= 4)
+        sign = lua_toboolean (L, 5);
+
     matchtag = flux_matchtag_alloc (f, 0);
     if (matchtag == FLUX_MATCHTAG_NONE)
         return lua_pusherror (L, (char *)flux_strerror (errno));
 
-    rc = flux_json_request (f, nodeid, matchtag, tag, o);
+    rc = flux_json_request_signed (f, sign, nodeid, matchtag, tag, o);
     json_object_put (o);
     if (rc < 0)
         return lua_pusherror (L, (char *)flux_strerror (errno));
@@ -559,7 +635,6 @@ static int l_flux_rpc (lua_State *L)
 
     if (tag == NULL || o == NULL)
         return lua_pusherror (L, "Invalid args");
-
     if (flux_json_rpc (f, nodeid, tag, o, &resp) < 0) {
         json_object_put (o);
         return lua_pusherror (L, (char *)flux_strerror (errno));
