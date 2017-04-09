@@ -37,6 +37,7 @@
 #include "src/common/libutil/log.h"
 #include "src/common/libutil/shortjson.h"
 #include "src/common/libutil/zsigcert.h"
+#include "src/common/libutil/xzmalloc.h"
 
 #include "attr.h"
 #include "exec.h"
@@ -49,6 +50,33 @@ typedef struct {
     uid_t owner;
     zsigcert_t *cert;
 } exec_t;
+
+typedef struct {
+    exec_t *x;
+    flux_msg_t *msg;
+    uid_t userid;
+} proc_info_t;
+
+
+static proc_info_t *
+proc_info_create (exec_t *x, const flux_msg_t *msg, uid_t userid)
+{
+    proc_info_t *pi = xzmalloc (sizeof (*pi));
+    pi->x = x;
+    pi->msg = flux_msg_copy (msg, true);
+    pi->userid = userid;
+    return (pi);
+}
+
+static void
+proc_info_destroy (proc_info_t *pi)
+{
+    pi->x = NULL;
+    flux_msg_destroy (pi->msg);
+    pi->msg = NULL;
+    pi->userid = -1;
+    free (pi);
+}
 
 static json_object *
 subprocess_json_resp (exec_t *x, struct subprocess *p)
@@ -67,8 +95,9 @@ subprocess_json_resp (exec_t *x, struct subprocess *p)
 static int child_exit_handler (struct subprocess *p)
 {
     int n;
-    exec_t *x = subprocess_get_context (p, "exec_ctx");
-    flux_msg_t *msg = (flux_msg_t *) subprocess_get_context (p, "msg");
+    proc_info_t *pi = subprocess_get_context (p, "proc_info");
+    exec_t *x = pi->x;
+    flux_msg_t *msg = pi->msg;
     json_object *resp;
 
     assert (x != NULL);
@@ -83,9 +112,9 @@ static int child_exit_handler (struct subprocess *p)
         Jadd_int (resp, "exec_errno", n);
 
     flux_respond (x->h, msg, 0, Jtostr (resp));
-    flux_msg_destroy (msg);
     json_object_put (resp);
 
+    proc_info_destroy (pi);
     subprocess_destroy (p);
 
     return (0);
@@ -93,8 +122,9 @@ static int child_exit_handler (struct subprocess *p)
 
 static int subprocess_io_cb (struct subprocess *p, const char *json_str)
 {
-    exec_t *x = subprocess_get_context (p, "exec_ctx");
-    flux_msg_t *orig = subprocess_get_context (p, "msg");
+    proc_info_t *pi = subprocess_get_context (p, "proc_info");
+    exec_t *x = pi->x;
+    flux_msg_t *orig = pi->msg;
     json_object *o = NULL;
     int rc = -1;
 
@@ -149,6 +179,8 @@ static void write_request_cb (flux_t *h, flux_msg_handler_t *w,
         void *data = NULL;
         bool eof;
         struct subprocess *p;
+        uint32_t userid;
+        proc_info_t *pi;
 
         /* XXX: We use zio_json_decode() here for convenience. Probably
          *  this should be bubbled up as a subprocess IO json spec with
@@ -156,8 +188,19 @@ static void write_request_cb (flux_t *h, flux_msg_handler_t *w,
          */
         if ((len = zio_json_decode (Jtostr (o), &data, &eof)) < 0)
             goto out;
-        if (!(p = subprocess_get_pid (x->sm, pid))) {
+        if (!(p = subprocess_get_pid (x->sm, pid)) ||
+            !(pi = subprocess_get_context (p, "proc_info"))) {
             errnum = ENOENT;
+            free (data);
+            goto out;
+        }
+        if (flux_msg_get_userid (msg, &userid) < 0) {
+            errnum = EINVAL;
+            free (data);
+            goto out;
+        }
+        if ((uid_t) userid != pi->userid) {
+            errnum = EACCES;
             free (data);
             goto out;
         }
@@ -320,9 +363,9 @@ static void exec_request_cb (flux_t *h, flux_msg_handler_t *w,
     json_object *response = NULL;
     const char *json_str;
     struct subprocess *p;
-    flux_msg_t *copy;
     const char *local_uri;
     uid_t userid;
+    proc_info_t *pi;
 
     if (flux_msg_get_userid (msg, &userid) < 0)
         goto out_free;
@@ -348,14 +391,11 @@ static void exec_request_cb (flux_t *h, flux_msg_handler_t *w,
     /*
      *  Set common context and hooks
      */
-    subprocess_set_context (p, "exec_ctx", x);
+    if (!(pi = proc_info_create (x, msg, userid)))
+        goto out_free;
+    subprocess_set_context (p, "proc_info", (void *) pi);
     subprocess_add_hook (p, SUBPROCESS_COMPLETE, child_exit_handler);
     subprocess_add_hook (p, SUBPROCESS_PRE_EXEC, do_setpgrp);
-    /*
-     * Save a copy of msg for future messages
-     */
-    copy = flux_msg_copy (msg, true);
-    subprocess_set_context (p, "msg", (void *) copy);
 
     subprocess_set_io_callback (p, subprocess_io_cb);
 
@@ -386,8 +426,8 @@ out_free:
 static char *subprocess_sender (struct subprocess *p)
 {
     char *sender;
-    flux_msg_t *msg = subprocess_get_context (p, "msg");
-    if (!msg || flux_msg_get_route_first (msg, &sender) < 0)
+    proc_info_t *pi = subprocess_get_context (p, "proc_info");
+    if (!pi || !pi->msg || flux_msg_get_route_first (pi->msg, &sender) < 0)
         return NULL;
     return (sender);
 }
