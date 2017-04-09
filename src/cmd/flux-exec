@@ -269,7 +269,7 @@ local msg = {
 }
 
 for i in ranks:next() do
-    local matchtag, err = f:send ("cmb.exec", msg, i )
+    local matchtag, err = f:send ("cmb.exec", msg, i, true )
     if not matchtag then error (err) end
     state.matchtag (matchtag, i)
 end
