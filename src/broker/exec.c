@@ -267,6 +267,11 @@ multiuser_subprocess (exec_t *x, uid_t userid, const char *J)
     int argc = 3;
     char *args[] = { "flux", "mock-imp", "run", NULL };
 
+    if (!x->cert) {
+        errno = EACCES;
+        return (NULL);
+    }
+
     if (!J || !(o = Jfromstr (J)) || !Jget_str (o, "sig", &Jsig)) {
         errno = EPROTO;
         return (NULL);
@@ -569,10 +574,8 @@ int exec_initialize (flux_t *h, struct subprocess_manager *sm,
     x->sm = sm;
     x->rank = rank;
     x->attrs = attrs;
-    if (!(x->cert = load_cert (h, x->owner))) {
-        free (x);
-        return (-1);
-    }
+    if (!(x->cert = load_cert (h, x->owner)))
+        flux_log_error (h, "no signing cert available, no multi-user support");
     if (flux_msg_handler_addvec (h, handlers, x) < 0) {
         free (x);
         return -1;
