@@ -28,6 +28,7 @@
 #include <sys/param.h>
 #include <signal.h>
 #include <unistd.h>
+#include <sys/types.h>
 #include <assert.h>
 #include <flux/core.h>
 
@@ -35,6 +36,7 @@
 #include "src/common/libsubprocess/subprocess.h"
 #include "src/common/libutil/log.h"
 #include "src/common/libutil/shortjson.h"
+#include "src/common/libutil/zsigcert.h"
 
 #include "attr.h"
 #include "exec.h"
@@ -44,6 +46,8 @@ typedef struct {
     struct subprocess_manager *sm;
     uint32_t rank;
     attr_t *attrs;
+    uid_t owner;
+    zsigcert_t *cert;
 } exec_t;
 
 static json_object *
@@ -209,27 +213,58 @@ static int do_setpgrp (struct subprocess *p)
     return (0);
 }
 
-/*
- *  Create a subprocess described in the msg argument.
- */
-static void exec_request_cb (flux_t *h, flux_msg_handler_t *w,
-                             const flux_msg_t *msg, void *arg)
+static struct subprocess *
+multiuser_subprocess (exec_t *x, uid_t userid, const char *J)
 {
-    exec_t *x = arg;
-    json_object *request = NULL;
-    json_object *response = NULL;
-    json_object *o;
-    const char *json_str;
-    struct subprocess *p;
-    flux_msg_t *copy;
+    struct subprocess *p = NULL;
+    json_object *o = NULL;
+    json_object *q = NULL;
+    const char *Jsig;
+    char *R = NULL;
+    int argc = 3;
+    char *args[] = { "flux", "mock-imp", "run", NULL };
+
+    if (!J || !(o = Jfromstr (J)) || !Jget_str (o, "sig", &Jsig)) {
+        errno = EPROTO;
+        return (NULL);
+    }
+
+    /* Create and sign R */
+    q = Jnew ();
+    Jadd_int (q, "userid", userid);
+    Jadd_str (q, "J", Jsig);
+
+    if (zsigcert_sign_json (x->cert, Jtostr (q), &R) < 0)
+        goto done;
+
+    if (!(p = subprocess_create (x->sm))) {
+        flux_log_error (x->h, "subprocess_create");
+        goto done;
+    }
+    if (subprocess_set_args (p, argc, args) < 0) {
+        flux_log_error (x->h, "subprocess_set_args");
+        goto done;
+    }
+
+    // Propagate current environment
+    subprocess_set_environ (p, environ);
+
+    subprocess_write (p, (void *) R, strlen (R), false);
+    subprocess_write (p, (void *) J, strlen (J), false);
+done:
+    Jput (o);
+    Jput (q);
+    free (R);
+    return (p);
+}
+
+static struct subprocess *
+singleuser_subprocess (exec_t *x, const char *json_str)
+{
     int i, argc;
-    const char *local_uri;
-
-    if (attr_get (x->attrs, "local-uri", &local_uri, NULL) < 0)
-        log_err_exit ("%s: local_uri is not set", __FUNCTION__);
-
-    if (flux_request_decode (msg, NULL, &json_str) < 0)
-        goto out_free;
+    json_object *o = NULL;
+    json_object *request = NULL;
+    struct subprocess *p = NULL;
 
     if (!json_str
         || !(request = Jfromstr (json_str))
@@ -246,9 +281,6 @@ static void exec_request_cb (flux_t *h, flux_msg_handler_t *w,
     }
 
     p = subprocess_create (x->sm);
-    subprocess_set_context (p, "exec_ctx", x);
-    subprocess_add_hook (p, SUBPROCESS_COMPLETE, child_exit_handler);
-    subprocess_add_hook (p, SUBPROCESS_PRE_EXEC, do_setpgrp);
 
     for (i = 0; i < argc; i++) {
         json_object *ox = json_object_array_get_idx (o, i);
@@ -266,10 +298,6 @@ static void exec_request_cb (flux_t *h, flux_msg_handler_t *w,
     }
     else
         subprocess_set_environ (p, environ);
-    /*
-     *  Override key FLUX environment variables in env array
-     */
-    subprocess_setenv (p, "FLUX_URI", local_uri, 1);
 
     if (json_object_object_get_ex (request, "cwd", &o) && o != NULL) {
         const char *dir = json_object_get_string (o);
@@ -277,6 +305,52 @@ static void exec_request_cb (flux_t *h, flux_msg_handler_t *w,
             subprocess_set_cwd (p, dir);
     }
 
+out_free:
+    Jput (o);
+    return (p);
+}
+
+/*
+ *  Create a subprocess described in the msg argument.
+ */
+static void exec_request_cb (flux_t *h, flux_msg_handler_t *w,
+                             const flux_msg_t *msg, void *arg)
+{
+    exec_t *x = arg;
+    json_object *response = NULL;
+    const char *json_str;
+    struct subprocess *p;
+    flux_msg_t *copy;
+    const char *local_uri;
+    uid_t userid;
+
+    if (flux_msg_get_userid (msg, &userid) < 0)
+        goto out_free;
+
+    if (flux_request_decode (msg, NULL, &json_str) < 0)
+        goto out_free;
+
+    if (userid == x->owner)
+        p = singleuser_subprocess (x, json_str);
+    else
+        p = multiuser_subprocess (x, userid, json_str);
+
+    if (p == NULL)
+        goto out_free;
+
+    /*
+     *  Override key FLUX environment variables in env array
+     */
+    if (attr_get (x->attrs, "local-uri", &local_uri, NULL) < 0)
+        log_err_exit ("%s: local_uri is not set", __FUNCTION__);
+    subprocess_setenv (p, "FLUX_URI", local_uri, 1);
+
+    /*
+     *  Set common context and hooks
+     */
+    subprocess_set_context (p, "exec_ctx", x);
+    subprocess_add_hook (p, SUBPROCESS_COMPLETE, child_exit_handler);
+    subprocess_add_hook (p, SUBPROCESS_PRE_EXEC, do_setpgrp);
     /*
      * Save a copy of msg for future messages
      */
@@ -305,8 +379,6 @@ static void exec_request_cb (flux_t *h, flux_msg_handler_t *w,
         flux_respond (h, msg, 0, Jtostr (response));
     }
 out_free:
-    if (request)
-        json_object_put (request);
     if (response)
         json_object_put (response);
 }
@@ -411,6 +483,39 @@ static void exec_finalize (void *arg)
     flux_msg_handler_delvec (handlers);
 }
 
+static void
+flux_msg_handler_vec_allow_rolemask (struct flux_msg_handler_spec *spec,
+                                     uint32_t mask)
+{
+    while (spec->w != NULL) {
+        flux_msg_handler_allow_rolemask (spec->w, mask);
+        spec++;
+    }
+}
+
+/*
+ *  Load cert for userid. Lifted from zsigcert.c
+ */
+static zsigcert_t *load_cert (flux_t *h, uint32_t userid)
+{
+    char path[PATH_MAX];
+    struct passwd *pw;
+    zsigcert_t *cert;
+
+    if (!(pw = getpwuid (userid))) {
+        flux_log_error (h, "can't find HOME for uid %ju", (uintmax_t) userid);
+        return NULL;
+    }
+    snprintf (path, sizeof (path),
+              "%s/.flux/curve/signature_secret", pw->pw_dir);
+
+    if (!(cert = zsigcert_load (path))) {
+        flux_log_error (h, "zsigcert_load");
+        return NULL;
+    }
+    return cert;
+}
+
 int exec_initialize (flux_t *h, struct subprocess_manager *sm,
                      uint32_t rank, attr_t *attrs)
 {
@@ -419,14 +524,20 @@ int exec_initialize (flux_t *h, struct subprocess_manager *sm,
         errno = ENOMEM;
         return -1;
     }
+    x->owner = getuid ();
     x->h = h;
     x->sm = sm;
     x->rank = rank;
     x->attrs = attrs;
+    if (!(x->cert = load_cert (h, x->owner))) {
+        free (x);
+        return (-1);
+    }
     if (flux_msg_handler_addvec (h, handlers, x) < 0) {
         free (x);
         return -1;
     }
+    flux_msg_handler_vec_allow_rolemask (handlers, FLUX_ROLE_USER);
     flux_aux_set (h, "flux::exec", x, exec_finalize);
     return 0;
 }
