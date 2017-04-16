@@ -34,8 +34,15 @@
 #include "src/common/libutil/log.h"
 #include "src/common/libutil/zsigcert.h"
 
+struct pid_info {
+    pid_t pid;
+    char cg_path [PATH_MAX];
+    uid_t cg_owner;
+};
+
 int cmd_version (optparse_t *p, int argc, char **argv);
 int cmd_run (optparse_t *p, int argc, char **argv);
+int cmd_kill (optparse_t *p, int argc, char **argv);
 
 static struct optparse_subcommand subcommands[] = {
     { "version",
@@ -49,6 +56,13 @@ static struct optparse_subcommand subcommands[] = {
       NULL,
       "Run command described by signed credential on stdin",
       cmd_run,
+      0,
+      NULL
+    },
+    { "kill",
+      "PID",
+      "Send SIGKILL to PID",
+      cmd_kill,
       0,
       NULL
     },
@@ -480,6 +494,119 @@ int cmd_run (optparse_t *p, int argc, char **argv)
     /* NORETURN */
     return (-1);
 }
+
+
+static int pid_info_load (struct pid_info *p, pid_t pid);
+
+static int check_and_kill_process (struct cmd_request *cmd, pid_t pid)
+{
+    struct pid_info pi;
+
+    if (pid_info_load (&pi, pid) < 0)
+        log_msg_exit ("Failed to get info for pid %ju\n", (uintmax_t) pid);
+
+    /* Check if pid is in pids cgroup owned by owner UID */
+    if (pi.cg_owner != cmd->owner)
+        log_msg_exit ("Refusing kill request from UID %ju to process %ju",
+                      (uintmax_t) cmd->owner, (uintmax_t) pid);
+    /* Send signal */
+    if (kill (pid, SIGKILL) < 0) {
+        int code = errno;
+        log_err ("kill");
+        exit (code);
+    }
+    return (0);
+}
+
+int cmd_kill (optparse_t *p, int argc, char **argv)
+{
+    struct cmd_request cmd;
+    int i;
+
+    if (argc < 1)
+        log_msg_exit ("Missing PID argument");
+
+    memset (&cmd, 0, sizeof (cmd));
+
+    if (cmd_initialize_credentials (&cmd) < 0)
+        log_msg_exit ("failed to get current process credentials");
+
+    if (cmd.euid != 0)
+        log_msg ("Running in unprivileged mode...");
+
+    for (i = 1; i < argc; i++) {
+        char *p;
+        long pid = strtol (argv[i], &p, 10);
+        if (*p != '\0' || pid < 0)
+            log_msg_exit ("Invalid argument '%s'\n", argv [i]);
+        check_and_kill_process (&cmd, pid);
+    }
+    return (0);
+}
+
+static const char cgroup_mount_dir[] = "/sys/fs/cgroup/systemd";
+
+static int pid_systemd_cgroup_path (pid_t pid, char *buf, size_t len)
+{
+    int rc = -1;
+    FILE *fp;
+    size_t size = 0;
+    ssize_t n;
+    char file [PATH_MAX];
+    char *line = NULL;
+
+    n = snprintf (file, sizeof(file), "/proc/%ju/cgroup", (uintmax_t) pid);
+    if ((n < 0) || (n >= PATH_MAX))
+        return (-1);
+
+    if (!(fp = fopen (file, "r")))
+        return (-1);
+
+    while ((n = getline (&line, &size, fp)) >= 0) {
+        char *nl;
+        char *relpath = NULL;
+        char *subsys = strchr (line, ':');
+        if ((nl = strchr (line, '\n')))
+            *nl = '\0';
+        if (subsys == NULL || *(++subsys) == '\0'
+            || !(relpath = strchr (subsys, ':')))
+            continue;
+        /* Nullify subsys, relpath is already nul-terminated at newline */
+        *(relpath++) = '\0';
+        if (strcmp (subsys, "name=systemd") == 0) {
+            n = snprintf (buf, len, "%s%s", cgroup_mount_dir, relpath);
+            if ((n > 0) && (n < len))
+                rc = 0;
+            break;
+        }
+    }
+
+    free (line);
+    fclose (fp);
+    return (rc);
+}
+
+static uid_t path_owner (const char *path)
+{
+    struct stat st;
+    if (stat (path, &st) < 0) {
+        log_err ("stat (%s)", path);
+        return ((uid_t) -1);
+    }
+    return st.st_uid;
+}
+
+static int pid_info_load (struct pid_info *p, pid_t pid)
+{
+    p->pid = pid;
+    if (pid_systemd_cgroup_path (pid, p->cg_path, sizeof (p->cg_path)) < 0)
+        return (-1);
+    if ((p->cg_owner = path_owner (p->cg_path)) == (uid_t) -1)
+        return (-1);
+    // ENOTSUPPORTED p->uid = pid_owner (pid);
+    return (0);
+}
+
 
 /*
  * vi: tabstop=4 shiftwidth=4 expandtab
