@@ -219,6 +219,79 @@ out:
         json_object_put (request);
 }
 
+
+static void signal_request_respond (flux_t *h, const flux_msg_t *msg,
+    int errnum)
+{
+    if (flux_respondf (h, msg, "{s:i}", "code", errnum) < 0)
+        flux_log_error (h, "signal_request_respond: flux_respondf");
+}
+
+static int imp_kill_completion (struct subprocess *p)
+{
+    int errnum = -EACCES;
+    proc_info_t *pi = subprocess_get_context (p, "proc_info");
+
+    if (subprocess_exit_code (p) == 0)
+        errnum = 0;
+    else
+        flux_log (pi->x->h, LOG_ERR, "flux mock-imp kill: %s",
+                  subprocess_exit_string (p));
+    signal_request_respond (pi->x->h, pi->msg, errnum);
+    proc_info_destroy (pi);
+    subprocess_destroy (p);
+    return (0);
+}
+
+static int imp_kill_process (exec_t *x, const flux_msg_t *msg, pid_t pid)
+{
+    proc_info_t *pi;
+    char *args[] = { "flux", "mock-imp", "kill", NULL};
+    int argc = 3;
+    struct subprocess *p;
+    char pidstr[64];
+    int n;
+    int rc = -1;
+
+    n = snprintf (pidstr, sizeof (pidstr), "%lu", (unsigned long) pid);
+    if ((n <= 0) || (n >= sizeof (pidstr))) {
+        flux_log_error (x->h, "failed to convert pid to string");
+        return (-1);
+    }
+
+    if (!(p = subprocess_create (x->sm))) {
+        flux_log_error (x->h, "subprocess_create");
+        goto done;
+    }
+    if (subprocess_set_args (p, argc, args) < 0) {
+        flux_log_error (x->h, "subprocess_set_args");
+        goto done;
+    }
+    if (subprocess_argv_append (p, pidstr) < 0) {
+        flux_log_error (x->h, "subprocess_argv_append");
+        goto done;
+    }
+
+    // Propagate current environment
+    subprocess_set_environ (p, environ);
+
+    if (!(pi = proc_info_create (x, msg, -1)))
+        goto done;
+    subprocess_set_context (p, "proc_info", (void *) pi);
+    subprocess_add_hook (p, SUBPROCESS_COMPLETE, imp_kill_completion);
+
+    flux_log (x->h, LOG_INFO, "about to call flux mock-imp kill on %ld\n", (long) pid);
+
+    if (subprocess_run (p) < 0) {
+        flux_log_error (x->h, "subprocess_argv_append");
+        goto done;
+    }
+    return (0);
+done:
+    subprocess_destroy (p);
+    return (rc);
+}
+
 static void signal_request_cb (flux_t *h, flux_msg_handler_t *w,
                                const flux_msg_t *msg, void *arg)
 {
@@ -227,6 +300,7 @@ static void signal_request_cb (flux_t *h, flux_msg_handler_t *w,
     int errnum = EPROTO;
     int signum;
     struct subprocess *p;
+    uint32_t userid;
 
     if (flux_request_decodef (msg, NULL, "{ s:i }", "pid", &pid) < 0) {
         errnum = errno;
@@ -234,19 +308,38 @@ static void signal_request_cb (flux_t *h, flux_msg_handler_t *w,
     }
     if (flux_request_decodef (msg, NULL, "{ s:i }", "signum", &signum) < 0)
         signum = SIGTERM;
+    if (flux_msg_get_userid (msg, &userid) < 0) {
+        errnum = errno;
+        goto out;
+    }
     p = subprocess_manager_first (x->sm);
     while (p) {
         if (pid == subprocess_pid (p)) {
+            proc_info_t *pi = subprocess_get_context (p, "proc_info");
             errnum = 0;
             /* Send signal to entire process group */
-            if (kill (-pid, signum) < 0)
-                errnum = errno;
+            if (pi->userid == x->owner) {
+                if (kill (-pid, signum) < 0)
+                    errnum = errno;
+                goto out;
+            }
+            else if (userid == x->owner) {
+                /* Asynchronously kill process via IMP */
+                imp_kill_process (pi->x, msg, pid);
+                /* return immediately, response will be sent after
+                 *  subprocess completion.
+                 */
+                return;
+            }
+            else {
+                errnum = EACCES;
+                goto out;
+            }
         }
         p = subprocess_manager_next (x->sm);
     }
 out:
-    if (flux_respondf (h, msg, "{ s:i }", "code", errnum) < 0)
-        flux_log_error (h, "signal_request_cb: flux_respondf");
+    signal_request_respond (h, msg, errnum);
 }
 
 static int do_setpgrp (struct subprocess *p)
@@ -357,6 +450,7 @@ out_free:
     Jput (o);
     return (p);
 }
+
 
 /*
  *  Create a subprocess described in the msg argument.
