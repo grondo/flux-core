@@ -537,7 +537,8 @@ int cmd_kill (optparse_t *p, int argc, char **argv)
     for (i = 1; i < argc; i++) {
         char *p;
         long pid = strtol (argv[i], &p, 10);
-        if (*p != '\0' || pid < 0)
+        /*  As in kill (2), pid may be < 0 */
+        if (*p != '\0' || pid == 0)
             log_msg_exit ("Invalid argument '%s'\n", argv [i]);
         check_and_kill_process (&cmd, pid);
     }
@@ -598,6 +599,8 @@ static uid_t path_owner (const char *path)
 
 static int pid_info_load (struct pid_info *p, pid_t pid)
 {
+    if (pid < 0)
+        pid = -pid;
     p->pid = pid;
     if (pid_systemd_cgroup_path (pid, p->cg_path, sizeof (p->cg_path)) < 0)
         return (-1);
