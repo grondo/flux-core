@@ -507,8 +507,8 @@ static int check_and_kill_process (struct cmd_request *cmd, pid_t pid)
 
     /* Check if pid is in pids cgroup owned by owner UID */
     if (pi.cg_owner != cmd->owner)
-        log_msg_exit ("Refusing kill request from UID %ju to process %ju",
-                      (uintmax_t) cmd->owner, (uintmax_t) pid);
+        log_msg_exit ("Refusing kill request from UID %ju to process %jd",
+                      (uintmax_t) cmd->owner, (intmax_t) pid);
     /* Send signal */
     if (kill (pid, SIGKILL) < 0) {
         int code = errno;
@@ -534,12 +534,12 @@ int cmd_kill (optparse_t *p, int argc, char **argv)
     if (cmd.euid != 0)
         log_msg ("Running in unprivileged mode...");
 
-    for (i = 1; i < argc; i++) {
+    for (i = optparse_option_index (p); i < argc; i++) {
         char *p;
         long pid = strtol (argv[i], &p, 10);
         /*  As in kill (2), pid may be < 0 */
         if (*p != '\0' || pid == 0)
-            log_msg_exit ("Invalid argument '%s'\n", argv [i]);
+            log_msg_exit ("Invalid PIDs argument '%s'\n", argv [i]);
         check_and_kill_process (&cmd, pid);
     }
     return (0);
