@@ -545,27 +545,51 @@ static char *subprocess_sender (struct subprocess *p)
     return (sender);
 }
 
+static int kill_process (exec_t *x, struct subprocess *p, int signum)
+{
+    int rc;
+    proc_info_t *pi;
+    pid_t pid;
+
+    if (!(pi = subprocess_get_context (p, "proc_info"))
+        || ((pid = subprocess_pid (p)) <= (pid_t) 0))
+        return (-1);
+
+    flux_log (x->h, LOG_INFO, "Terminating PGRP %ju", (uintmax_t) pid);
+
+    if (pi->userid == x->owner)
+        rc = kill (-pid, SIGKILL);
+    else
+        rc = imp_kill_process (x, NULL, -pid);
+    return (rc);
+}
+
 int exec_terminate_subprocesses_by_uuid (flux_t *h, const char *id)
 {
+    zlist_t *tokill;
     exec_t *x = flux_aux_get (h, "flux::exec");
 
+    /*
+     *   Collect processes to kill first, then terminate in a second
+     *    loop. This is in case a helper process needs to be executed
+     *    to deliver the signal, which would create a new process and
+     *    modify list during traversal...
+     */
     struct subprocess *p = subprocess_manager_first (x->sm);
+    if (!(tokill = zlist_new ()))
+        return (-1);
+
     while (p) {
         char *sender;
-        if ((sender = subprocess_sender (p))) {
-            pid_t pid;
-            if ((strcmp (id, sender) == 0)
-               && ((pid = subprocess_pid (p)) > (pid_t) 0)) {
-                /* Kill process group for subprocess p */
-                flux_log (x->h, LOG_INFO,
-                          "Terminating PGRP %ld", (unsigned long) pid);
-                if (kill (-pid, SIGKILL) < 0)
-                    flux_log_error (x->h, "killpg");
-            }
-            free (sender);
-        }
+        if ((sender = subprocess_sender (p)) && (strcmp (id, sender) == 0))
+            zlist_append (tokill, p);
+        free (sender);
         p = subprocess_manager_next (x->sm);
     }
+    while ((p = zlist_pop (tokill)))
+        kill_process (x, p, SIGKILL);
+
+    zlist_destroy (&tokill);
     return (0);
 }
 
