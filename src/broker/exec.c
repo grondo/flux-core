@@ -323,9 +323,11 @@ static void signal_request_cb (flux_t *h, flux_msg_handler_t *w,
                     errnum = errno;
                 goto out;
             }
-            else if (userid == x->owner) {
+            // Either instance owner or process owner can request signal:
+            else if (userid == pi->userid || userid == x->owner) {
                 /* Asynchronously kill process via IMP */
-                imp_kill_process (pi->x, msg, pid);
+                if (imp_kill_process (pi->x, msg, -pid) < 0)
+                    flux_log_error (h, "imp_kill_process");
                 /* return immediately, response will be sent after
                  *  subprocess completion.
                  */
