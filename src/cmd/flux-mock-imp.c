@@ -262,7 +262,7 @@ static int exec_request_as_user (json_t *req, uid_t uid)
     if (chdir (cwd) < 0)
         log_msg_exit ("chdir (%s)", cwd);
 
-    log_msg ("chdir ('%s')", cwd);
+    //log_msg ("chdir ('%s')", cwd);
 
     if (json_get_argz (req, "cmdline", &argz, &argz_len) < 0)
         log_msg_exit ("failed to get cmdline from request");
@@ -278,7 +278,7 @@ static int exec_request_as_user (json_t *req, uid_t uid)
     argv = expand_argz (argz, argz_len);
     env = expand_argz (envz, envz_len);
 
-    log_msg ("calling execvp(%s)", argv[0]);
+    //log_msg ("calling execvp(%s)", argv[0]);
     execvpe (argv[0], argv, env);
     fprintf (stderr, "%s: %s", argv[0], strerror (errno));
     if (errno == EPERM || errno == EACCES)
@@ -465,8 +465,8 @@ int cmd_run (optparse_t *p, int argc, char **argv)
     if (cmd_initialize_credentials (&cmd) < 0)
         log_msg_exit ("failed to get current process credentials");
 
-    log_msg ("euid = %ju, owner (real uid) is %ju",
-        (uintmax_t) cmd.euid, (uintmax_t) cmd.owner);
+    //log_msg ("euid = %ju, owner (real uid) is %ju",
+    //    (uintmax_t) cmd.euid, (uintmax_t) cmd.owner);
 
     if (cmd.euid != 0)
         log_msg ("Running in unprivileged mode...");
@@ -480,12 +480,12 @@ int cmd_run (optparse_t *p, int argc, char **argv)
     if (cmd.guest == 0)
         log_msg_exit ("Cowardly refusing to run with with guest UID 0");
 
-    log_msg ("Executing as guest UID %ju", (uintmax_t) cmd.guest);
+    //log_msg ("Executing as guest UID %ju", (uintmax_t) cmd.guest);
 
     if (!(cmd.J = zcert_json_verify_loadf (cmd.guest, stdin)))
         log_msg_exit ("Unable to process guest request on stdin");
 
-    log_msg ("Verified authenticity of req from %ju", (uintmax_t) cmd.guest);
+    //log_msg ("Verified authenticity of req from %ju", (uintmax_t) cmd.guest);
 
     if (cmd_request_validate (&cmd) < 0)
         log_msg_exit ("invalid R for J");
