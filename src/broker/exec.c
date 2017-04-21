@@ -246,20 +246,20 @@ static int imp_kill_completion (struct subprocess *p)
     }
 
     subprocess_destroy (p);
+
     return (0);
 }
 
 static int imp_kill_process (exec_t *x, const flux_msg_t *msg, pid_t pid)
 {
-    proc_info_t *pi;
-    char *args[] = { "flux", "mock-imp", "kill", NULL};
-    int argc = 3;
+    char *args[] = { "flux", "mock-imp", "kill", "--", NULL};
+    int argc = 4;
     struct subprocess *p;
     char pidstr[64];
     int n;
     int rc = -1;
 
-    n = snprintf (pidstr, sizeof (pidstr), "%lu", (unsigned long) pid);
+    n = snprintf (pidstr, sizeof (pidstr), "%ld", (long) pid);
     if ((n <= 0) || (n >= sizeof (pidstr))) {
         flux_log_error (x->h, "failed to convert pid to string");
         return (-1);
