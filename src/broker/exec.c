@@ -281,12 +281,17 @@ static int imp_kill_process (exec_t *x, const flux_msg_t *msg, pid_t pid)
     // Propagate current environment
     subprocess_set_environ (p, environ);
 
-    if (!(pi = proc_info_create (x, msg, -1)))
-        goto done;
-    subprocess_set_context (p, "proc_info", (void *) pi);
+    /*  Record proc_info_t if this call to imp_kill_process() was the
+     *   result of a message (i.e. msg != NULL), so that the completion
+     *   handler can issue a reply.
+     */
+    if (msg) {
+        proc_info_t *pi = proc_info_create (x, msg, -1);
+        if (pi == NULL)
+            goto done;
+        subprocess_set_context (p, "proc_info", (void *) pi);
+    }
     subprocess_add_hook (p, SUBPROCESS_COMPLETE, imp_kill_completion);
-
-    flux_log (x->h, LOG_INFO, "about to call flux mock-imp kill on %ld\n", (long) pid);
 
     if (subprocess_run (p) < 0) {
         flux_log_error (x->h, "subprocess_argv_append");
@@ -294,7 +299,8 @@ static int imp_kill_process (exec_t *x, const flux_msg_t *msg, pid_t pid)
     }
     return (0);
 done:
-    subprocess_destroy (p);
+    if (p)
+        subprocess_destroy (p);
     return (rc);
 }
 
