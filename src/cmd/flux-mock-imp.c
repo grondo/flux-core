@@ -1,4 +1,4 @@
-/*****************************************************************************\
+/*****************************************************************************
  *  Copyright (c) 2017 Lawrence Livermore National Security, LLC.  Produced at
  *  the Lawrence Livermore National Laboratory (cf, AUTHORS, DISCLAIMER.LLNS).
  *  LLNL-CODE-658032 All rights reserved.
@@ -271,7 +271,8 @@ static int exec_request_as_user (json_t *req, uid_t uid)
         log_msg_exit ("failed to get cmdline from request");
 
     /* Propagate FLUX_URI for child process */
-    if (envz_add (&envz, &envz_len, "FLUX_URI", getenv ("FLUX_URI")));
+    if (envz_add (&envz, &envz_len, "FLUX_URI", getenv ("FLUX_URI")) != 0)
+        log_msg_exit ("Out of memory adding FLUX_URI to environment");
 
     envz_strip (&envz, &envz_len);
 
