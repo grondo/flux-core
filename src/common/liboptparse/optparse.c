@@ -1251,7 +1251,7 @@ static int getopt_long_r (int argc, char *const *argv, const char *options,
                 struct _getopt_data *d)
 {
   return _getopt_internal_r (argc, argv, options, long_options, opt_index,
-                             0, d, 0);
+                             0, d, 1);
 }
 
 int optparse_parse_args (optparse_t *p, int argc, char *argv[])
