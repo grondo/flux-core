@@ -232,13 +232,19 @@ static int imp_kill_completion (struct subprocess *p)
     int errnum = -EACCES;
     proc_info_t *pi = subprocess_get_context (p, "proc_info");
 
-    if (subprocess_exit_code (p) == 0)
-        errnum = 0;
-    else
-        flux_log (pi->x->h, LOG_ERR, "flux mock-imp kill: %s",
-                  subprocess_exit_string (p));
-    signal_request_respond (pi->x->h, pi->msg, errnum);
-    proc_info_destroy (pi);
+    /*  If proc_info object was registered with this subprocess, then
+     *   there is a signal request message to which we must reply.
+     */
+    if (pi) {
+        if (subprocess_exit_code (p) == 0)
+            errnum = 0;
+        else
+            flux_log (pi->x->h, LOG_ERR, "flux mock-imp kill: %s",
+                    subprocess_exit_string (p));
+        signal_request_respond (pi->x->h, pi->msg, errnum);
+        proc_info_destroy (pi);
+    }
+
     subprocess_destroy (p);
     return (0);
 }
