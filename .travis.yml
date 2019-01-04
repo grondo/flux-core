@@ -177,4 +177,4 @@ deploy:
     # Only deploy from travis builder with GITHUB_RELEASES_DEPLOY set
     condition: $GITHUB_RELEASES_DEPLOY = "t"
     tags: true
-    repo: flux-framework/flux-core
+    repo: grondo/flux-core
