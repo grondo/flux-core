@@ -76,6 +76,7 @@ static optparse_t * setup_optparse_parse_args (int argc, char *argv[])
     optparse_t *p = optparse_create ("flux");
     if (p == NULL)
         log_err_exit ("optparse_create");
+
     optparse_set (p, OPTPARSE_USAGE, "[OPTIONS] COMMAND ARGS");
     e = optparse_add_option_table (p, opts);
     if (e != OPTPARSE_SUCCESS)
