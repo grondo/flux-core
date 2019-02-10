@@ -1,11 +1,14 @@
 pull_request_rules:
-  - name: automatic merge with strict
+  - name: rebase and merge when passing all checks
     conditions:
       - base=master
       - status-success=continuous-integration/travis-ci/pr
       - status-success=codecov/project
       - label="merge-when-passing"
       - label!="work-in-progress"
+      - -title~="^WIP:"
+      - "#changes-requested-reviews-by=0"
+      - "#approved-reviews-by>=2"
     actions:
       merge:
         method: merge
