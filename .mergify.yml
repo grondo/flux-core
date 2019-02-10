@@ -6,6 +6,7 @@ pull_request_rules:
       - status-success=codecov/project
       - label="merge-when-passing"
       - label!="work-in-progress"
+      - -title~=wip
     actions:
       merge:
         method: merge
