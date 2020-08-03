@@ -290,6 +290,21 @@ error:
     internal_fatal (rex->s, p);
 }
 
+static int exec_allowed (const flux_msg_t *msg)
+{
+    uint32_t userid;
+    uint32_t rolemask;
+
+    if (flux_msg_get_rolemask (msg, &rolemask) < 0
+        || flux_msg_get_userid (msg, &userid) < 0)
+        return -1;
+    if (!(rolemask & FLUX_ROLE_OWNER) && userid != getuid()) {
+        errno = EPERM;
+        return -1;
+    }
+    return 0;
+}
+
 static void server_exec_cb (flux_t *h, flux_msg_handler_t *mh,
                               const flux_msg_t *msg, void *arg)
 {
@@ -307,6 +322,9 @@ static void server_exec_cb (flux_t *h, flux_msg_handler_t *mh,
     };
     int on_channel_out, on_stdout, on_stderr;
     char **env = NULL;
+
+    if (exec_allowed (msg) < 0)
+        goto error;
 
     if (flux_request_unpack (msg, NULL, "{s:s s:i s:i s:i}",
                              "cmd", &cmd_str,
@@ -441,6 +459,11 @@ static void server_write_cb (flux_t *h, flux_msg_handler_t *mh,
     pid_t pid;
     json_t *io = NULL;
 
+    if (exec_allowed (msg) < 0) {
+        flux_log_error (s->h, "write_cb: dropping request due to EPERM");
+        return;
+    }
+
     if (flux_request_unpack (msg, NULL, "{ s:i s:o }",
                              "pid", &pid,
                              "io", &io) < 0) {
@@ -500,6 +523,9 @@ static void server_signal_cb (flux_t *h, flux_msg_handler_t *mh,
     int signum;
 
     errno = 0;
+
+    if (exec_allowed (msg) < 0)
+        goto error;
 
     if (flux_request_unpack (msg, NULL, "{ s:i s:i }",
                              "pid", &pid,
@@ -574,6 +600,9 @@ static void server_processes_cb (flux_t *h, flux_msg_handler_t *mh,
     flux_subprocess_t *p;
     json_t *procs = NULL;
 
+    if (exec_allowed (msg) < 0)
+        goto error;
+
     if (!(procs = json_array ())) {
         errno = ENOMEM;
         goto error;
@@ -604,12 +633,13 @@ error:
 
 int server_start (flux_subprocess_server_t *s, const char *prefix)
 {
+    int roles = FLUX_ROLE_USER;
     /* rexec.processes is primarily for testing */
     struct flux_msg_handler_spec htab[] = {
-        { FLUX_MSGTYPE_REQUEST, "rexec",        server_exec_cb, 0 },
-        { FLUX_MSGTYPE_REQUEST, "rexec.write",  server_write_cb, 0 },
-        { FLUX_MSGTYPE_REQUEST, "rexec.signal", server_signal_cb, 0 },
-        { FLUX_MSGTYPE_REQUEST, "rexec.processes", server_processes_cb, 0 },
+        { FLUX_MSGTYPE_REQUEST, "rexec",        server_exec_cb, roles },
+        { FLUX_MSGTYPE_REQUEST, "rexec.write",  server_write_cb, roles },
+        { FLUX_MSGTYPE_REQUEST, "rexec.signal", server_signal_cb, roles },
+        { FLUX_MSGTYPE_REQUEST, "rexec.processes", server_processes_cb, roles },
         FLUX_MSGHANDLER_TABLE_END,
     };
     char *topic_globs[4] = {NULL, NULL, NULL, NULL};
