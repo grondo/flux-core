@@ -34,6 +34,8 @@ static struct optparse_option cmdopts[] = {
       .usage = "Set the working directory to PATH" },
     { .name = "label-io", .key = 'l', .has_arg = 0,
       .usage = "Label lines of output with the source RANK" },
+    { .name = "service", .key = 's', .has_arg = 1,
+      .usage = "Set remote service name (default = \"cmb.rexec\")" },
     { .name = "noinput", .key = 'n', .has_arg = 0,
       .usage = "Redirect stdin from /dev/null" },
     { .name = "verbose", .key = 'v', .has_arg = 0,
@@ -343,6 +345,11 @@ int main (int argc, char *argv[])
 
     if (flux_cmd_setcwd (cmd, cwd) < 0)
         log_err_exit ("flux_cmd_setcwd");
+
+    if (optparse_getopt (opts, "service", &optargp) > 0) {
+        if (flux_cmd_setopt (cmd, "service", optargp) < 0)
+            log_err_exit ("flux_cmd_setopt (service)");
+    }
 
     if (!(h = flux_open (NULL, 0)))
         log_err_exit ("flux_open");
