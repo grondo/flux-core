@@ -160,14 +160,31 @@ static void remote_in_prep_cb (flux_reactor_t *r,
         flux_watcher_start (c->in_idle_w);
 }
 
+static int remote_service (flux_subprocess_t *p,
+                           const char *method,
+                           char *buf,
+                           int len)
+{
+    int n = snprintf (buf, len, "%s.%s", p->service, method);
+    if (n < 0 || n >= len)
+        return -1;
+    return 0;
+}
+
 static int remote_write (struct subprocess_channel *c)
 {
     flux_future_t *f = NULL;
     json_t *io = NULL;
     const void *ptr;
+    char service[128];
     int lenp;
     bool eof = false;
     int rv = -1;
+
+    if (remote_service (c->p, "write", service, sizeof (service)) < 0) {
+        flux_log_error (c->p->h, "failed to build remote service name");
+        goto error;
+    }
 
     if (!(ptr = flux_buffer_read (c->write_buffer, -1, &lenp))) {
         flux_log_error (c->p->h, "flux_buffer_read");
@@ -189,7 +206,7 @@ static int remote_write (struct subprocess_channel *c)
         goto error;
     }
 
-    if (!(f = flux_rpc_pack (c->p->h, "cmb.rexec.write", c->p->rank,
+    if (!(f = flux_rpc_pack (c->p->h, service, c->p->rank,
                              FLUX_RPC_NORESPONSE,
                              "{ s:i s:O }",
                              "pid", c->p->pid,
@@ -212,7 +229,13 @@ static int remote_close (struct subprocess_channel *c)
 {
     flux_future_t *f = NULL;
     json_t *io = NULL;
+    char service[128];
     int rv = -1;
+
+    if (remote_service (c->p, "write", service, sizeof (service)) < 0) {
+        flux_log_error (c->p->h, "failed to build remote service name");
+        goto error;
+    }
 
     /* rank not needed, set to 0 */
     if (!(io = ioencode (c->name, "0", NULL, 0, true))) {
@@ -220,7 +243,7 @@ static int remote_close (struct subprocess_channel *c)
         goto error;
     }
 
-    if (!(f = flux_rpc_pack (c->p->h, "cmb.rexec.write", c->p->rank,
+    if (!(f = flux_rpc_pack (c->p->h, service, c->p->rank,
                              FLUX_RPC_NORESPONSE,
                              "{ s:i s:O }",
                              "pid", c->p->pid,
@@ -526,6 +549,10 @@ static int remote_setup_channels (flux_subprocess_t *p)
 
 int subprocess_remote_setup (flux_subprocess_t *p)
 {
+    const char *service;
+    if (!(service = flux_cmd_getopt (p->cmd, "service")))
+        service = "cmb.rexec";
+    p->service = strdup (service);
     if (remote_setup_stdio (p) < 0)
         return -1;
     if (remote_setup_channels (p) < 0)
@@ -756,7 +783,7 @@ int remote_exec (flux_subprocess_t *p)
      * internally in this code.  But output callbacks are optional, we
      * don't care if user doesn't want it.
      */
-    if (!(f = flux_rpc_pack (p->h, "cmb.rexec", p->rank, 0,
+    if (!(f = flux_rpc_pack (p->h, p->service, p->rank, 0,
                              "{s:s s:i s:i s:i}",
                              "cmd", cmd_str,
                              "on_channel_out", p->ops.on_channel_out ? 1 : 0,
@@ -786,8 +813,14 @@ int remote_exec (flux_subprocess_t *p)
 flux_future_t *remote_kill (flux_subprocess_t *p, int signum)
 {
     flux_future_t *f;
+    char service[128];
 
-    if (!(f = flux_rpc_pack (p->h, "cmb.rexec.signal", p->rank, 0,
+    if (remote_service (p, "signal", service, sizeof (service)) < 0) {
+        flux_log_error (p->h, "remote_kill: failed to build service name");
+        return NULL;
+    }
+
+    if (!(f = flux_rpc_pack (p->h, service, p->rank, 0,
                              "{s:i s:i}",
                              "pid", p->pid,
                              "signum", signum))) {

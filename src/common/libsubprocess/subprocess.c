@@ -121,6 +121,7 @@ static void subprocess_free (flux_subprocess_t *p)
     if (p && p->magic == SUBPROCESS_MAGIC) {
         int saved_errno = errno;
         flux_cmd_destroy (p->cmd);
+        free (p->service);
 
         aux_destroy (&p->aux);
         if (p->channels)
