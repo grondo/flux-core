@@ -227,7 +227,7 @@ int boot_pmi (struct overlay *overlay, attr_t *attrs, int tbon_k)
             log_msg ("update_endpoint_attr failed");
             goto error;
         }
-        if (overlay_set_child (overlay, tbonendpoint) < 0) {
+        if (overlay_set_child (overlay, "%s", tbonendpoint) < 0) {
             log_err ("overlay_set_child");
             goto error;
         }

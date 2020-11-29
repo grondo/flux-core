@@ -471,7 +471,7 @@ int boot_config (flux_t *h, struct overlay *overlay, attr_t *attrs, int tbon_k)
                                        bind_uri,
                                        sizeof (bind_uri)) < 0)
             goto error;
-        if (overlay_set_child (overlay, bind_uri) < 0) {
+        if (overlay_set_child (overlay, "%s", bind_uri) < 0) {
             log_err ("overlay_set_child %s", bind_uri);
             goto error;
         }
@@ -513,7 +513,7 @@ int boot_config (flux_t *h, struct overlay *overlay, attr_t *attrs, int tbon_k)
                                       parent_uri,
                                       sizeof (parent_uri)) < 0)
             goto error;
-        if (overlay_set_parent (overlay, parent_uri) < 0) {
+        if (overlay_set_parent (overlay, "%s", parent_uri) < 0) {
             log_err ("overlay_set_parent %s", parent_uri);
             goto error;
         }
