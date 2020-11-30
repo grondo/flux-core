@@ -433,12 +433,13 @@ static int bind_child (struct overlay *ov, struct endpoint *ep)
         return -1;
     }
     zsock_set_router_mandatory (ep->zs, 1);
+    zsock_set_ipv6 (ep->zs, 1);
     if (zsecurity_ssockinit (ov->sec, ep->zs) < 0) {
         log_msg ("zsecurity_ssockinit: %s", zsecurity_errstr (ov->sec));
         return -1;
     }
     if (zsock_bind (ep->zs, "%s", ep->uri) < 0) {
-        log_err ("%s", ep->uri);
+        log_err ("%s: %s", ep->uri, zmq_strerror (zmq_errno ()));
         return -1;
     }
     if (strchr (ep->uri, '*')) { /* capture dynamically assigned port */
@@ -475,6 +476,7 @@ static int connect_parent (struct overlay *ov, struct endpoint *ep)
 
     if (!(ep->zs = zsock_new_dealer (NULL)))
         goto error;
+    zsock_set_ipv6 (ep->zs, 1);
     if (zsecurity_csockinit (ov->sec, ep->zs) < 0) {
         savederr = errno;
         log_msg ("zsecurity_csockinit: %s", zsecurity_errstr (ov->sec));
