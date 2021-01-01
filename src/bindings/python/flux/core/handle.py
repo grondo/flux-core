@@ -223,23 +223,26 @@ class Flux(Wrapper):
     def msg_watcher_create(
         self,
         callback,
+        *args,
         type_mask=raw.FLUX_MSGTYPE_ANY,
         topic_glob="*",
-        args=None,
         match_tag=raw.FLUX_MATCHTAG_NONE,
+        **kwargs,
     ):
-        return MessageWatcher(self, type_mask, callback, topic_glob, match_tag, args)
+        return MessageWatcher(
+            self, type_mask, callback, *args, topic_glob, match_tag, **kwargs
+        )
 
-    def timer_watcher_create(self, after, callback, repeat=0.0, args=None):
-        return TimerWatcher(self, after, callback, repeat=repeat, args=args)
+    def timer_watcher_create(self, after, callback, *args, repeat=0.0, **kwargs):
+        return TimerWatcher(self, after, callback, repeat=repeat, *args, **kwargs)
 
-    def signal_watcher_create(self, signum, callback, args=None):
-        return SignalWatcher(self, signum, callback, args)
+    def signal_watcher_create(self, signum, callback, *args, **kwargs):
+        return SignalWatcher(self, signum, callback, *args, **kwargs)
 
-    def fd_watcher_create(self, fd_int, callback, events=None, args=None):
+    def fd_watcher_create(self, fd_int, callback, *args, events=None, **kwargs):
         if events is None:
             events = FLUX_POLLIN | FLUX_POLLOUT | FLUX_POLLERR
-        return FDWatcher(self, fd_int, events, callback, args=args)
+        return FDWatcher(self, fd_int, events, callback, *args, **kwargs)
 
     def barrier(self, name, nprocs):
         self.flux_barrier(name, nprocs)

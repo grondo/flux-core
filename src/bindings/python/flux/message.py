@@ -15,7 +15,7 @@ import six
 
 from flux.wrapper import Wrapper, WrapperPimpl
 from flux.core.inner import ffi, lib, raw
-from flux.core.watchers import Watcher
+from flux.core.watchers import Watcher, watcher_compat_mode
 import flux.constants
 from flux.util import encode_payload, encode_topic
 
@@ -123,12 +123,21 @@ def message_handler_wrapper(unused1, unused2, msg_handle, opaque_handle):
     del unused1, unused2  # unused arguments
     watcher = ffi.from_handle(opaque_handle)
     try:
-        watcher.callback(
-            watcher.flux_handle,
-            watcher,
-            Message(handle=msg_handle, destruct=False),
-            watcher.args,
-        )
+        if not watcher.compat_mode:
+            watcher.callback(
+                watcher.flux_handle,
+                watcher,
+                Message(handle=msg_handle, destruct=False),
+                *watcher.args,
+                **watcher.kwargs,
+            )
+        else:
+            watcher.callback(
+                watcher.flux_handle,
+                watcher,
+                Message(handle=msg_handle, destruct=False),
+                watcher.kwargs["args"],
+            )
     # pylint: disable=broad-except
     except Exception as exc:
         type(watcher.flux_handle).set_exception(exc)
@@ -141,14 +150,18 @@ class MessageWatcher(Watcher):
         flux_handle,
         type_mask,
         callback,
+        *args,
         topic_glob="*",
         match_tag=flux.constants.FLUX_MATCHTAG_NONE,
-        args=None,
+        **kwargs,
     ):
         self.flux_handle = flux_handle
         self.callback = callback
         self.args = args
+        self.kwargs = kwargs
         self.wargs = ffi.new_handle(self)
+
+        self.compat_mode = watcher_compat_mode(self, 4)
 
         if topic_glob is None or topic_glob == ffi.NULL:
             topic_glob = ffi.NULL
