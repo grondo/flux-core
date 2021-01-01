@@ -36,7 +36,7 @@ class TestTimer(unittest.TestCase):
     def test_s1_0_timer_add(self):
         """Add a timer"""
         with self.f.timer_watcher_create(
-            10000, lambda x, y, z, w: x.fatal_error("timer should not run")
+            10000, lambda x, y, z: x.fatal_error("timer should not run")
         ) as tid:
             self.assertIsNotNone(tid)
 
@@ -52,7 +52,7 @@ class TestTimer(unittest.TestCase):
         """Register a timer and run the reactor to ensure it can stop it"""
         timer_ran = [False]
 
-        def cb(x, y, z, w):
+        def cb(x, y, z):
             timer_ran[0] = True
             x.reactor_stop()
 
@@ -62,24 +62,46 @@ class TestTimer(unittest.TestCase):
             self.assertEqual(ret, 0, msg="Reactor exit")
             self.assertTrue(timer_ran[0], msg="Timer did not run successfully")
 
+    def test_timer_with_reactor_compat(self):
+        """Register a timer and run the reactor to ensure it can stop it"""
+        timer_ran = [False]
+
+        def cb(x, y, z, args):
+            timer_ran[0] = True
+            x.reactor_stop()
+
+        with self.f.timer_watcher_create(0.1, cb, args=(1, 2)) as timer:
+            self.assertIsNotNone(timer, msg="timeout create")
+            ret = self.f.reactor_run()
+            self.assertEqual(ret, 0, msg="Reactor exit")
+            self.assertTrue(timer_ran[0], msg="Timer did not run successfully")
+
     def test_timer_callback_exception(self):
-        def cb(x, y, z, w):
+        def cb(x, y, z):
             raise RuntimeError("this is a test")
 
         with self.f.timer_watcher_create(0.01, cb) as timer:
             with self.assertRaises(RuntimeError) as cm:
                 self.f.reactor_run()
 
-    def test_msg_watcher_unicode(self):
+    def test_msg_watcher_compat(self):
         with self.f.msg_watcher_create(
             lambda handle, x, y, z: handle.fatal_error("cb should not run"),
+            topic_glob="foo.*",
+            arg="foo",
+        ) as mw:
+            self.assertIsNotNone(mw)
+
+    def test_msg_watcher_unicode(self):
+        with self.f.msg_watcher_create(
+            lambda handle, x, y: handle.fatal_error("cb should not run"),
             topic_glob="foo.*",
         ) as mw:
             self.assertIsNotNone(mw)
 
     def test_msg_watcher_bytes(self):
         with self.f.msg_watcher_create(
-            lambda handle, x, y, z: handle.fatal_error("cb should not run"),
+            lambda handle, x, y: handle.fatal_error("cb should not run"),
             topic_glob=b"foo.*",
         ) as mw:
             self.assertIsNotNone(mw)
@@ -108,7 +130,7 @@ class TestSignal(unittest.TestCase):
     def test_s0_signal_watcher_add(self):
         """Add a signal watcher"""
         with self.f.signal_watcher_create(
-            2, lambda x, y, z, w: x.fatal_error("signal should not fire")
+            2, lambda x, y, z: x.fatal_error("signal should not fire")
         ) as sigw:
             self.assertIsNotNone(sigw)
 
@@ -127,10 +149,10 @@ class TestSignal(unittest.TestCase):
             cb_called[0] = True
             handle.reactor_stop()
 
-        def raise_signal(handle, wathcer, revents, args):
+        def raise_signal(handle, watcher, revents):
             os.kill(os.getpid(), signal.SIGUSR1)
 
-        def stop(h, w, r, y):
+        def stop(h, w, r):
             h.reactor_stop()
 
         with self.f.signal_watcher_create(signal.SIGUSR1, cb) as watcher:
@@ -165,13 +187,34 @@ class TestFdWatcher(unittest.TestCase):
     def setUpClass(self):
         self.f = flux.Flux()
 
-    def test_fd_watcher(self):
-        def fd_cb(handle, watcher, fd, revents, _args):
+    def test_fd_watcher_compat(self):
+        def fd_cb(handle, watcher, fd, revents, args):
             reader = os.fdopen(fd)
             self.assertEqual(reader.read(), "a")
             handle.reactor_stop()
 
-        def timer_cb(handle, watcher, revents, _args):
+        def timer_cb(handle, watcher, revents):
+            handle.reactor_stop_error()
+
+        tw = self.f.timer_watcher_create(5, timer_cb)
+        tw.start()
+
+        fdr, fdw = os.pipe()
+        os.set_blocking(fdr, False)
+        writer = os.fdopen(fdw, "w")
+        with self.f.fd_watcher_create(fdr, fd_cb) as fdw:
+            writer.write("a")
+            writer.flush()
+            rc = self.f.reactor_run()
+            self.assertTrue(rc >= 0)
+
+    def test_fd_watcher(self):
+        def fd_cb(handle, watcher, fd, revents):
+            reader = os.fdopen(fd)
+            self.assertEqual(reader.read(), "a")
+            handle.reactor_stop()
+
+        def timer_cb(handle, watcher, revents):
             handle.reactor_stop_error()
 
         tw = self.f.timer_watcher_create(5, timer_cb)
@@ -187,10 +230,10 @@ class TestFdWatcher(unittest.TestCase):
             self.assertTrue(rc >= 0)
 
     def test_fd_watcher_exception(self):
-        def fd_cb(handle, watcher, fd, revents, _args):
+        def fd_cb(handle, watcher, fd, revents):
             raise RuntimeError
 
-        def timer_cb(handle, watcher, revents, _args):
+        def timer_cb(handle, watcher, revents):
             handle.reactor_stop()
 
         tw = self.f.timer_watcher_create(5, timer_cb)
