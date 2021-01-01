@@ -145,6 +145,22 @@ def message_handler_wrapper(unused1, unused2, msg_handle, opaque_handle):
 
 
 class MessageWatcher(Watcher):
+    """Invoke a callback for messages matching a critera
+
+    A MessageWatcher registers a ``callback`` to be invoked when a message
+    matching the match criteria specified by ``topic_glob`` and/or
+    ``match_tag`` is recieved on the Flux handle ``flux_handle``.
+
+    Any extra positional or keyword arguments used in the constructor will
+    be passed on to the callback.
+
+    The callback has the function signature::
+
+       callback(flux_handle, watcher, msg, *args, **kwargs)
+
+    For more information see ``flux_msg_handler_create(3)``
+    """
+
     def __init__(
         self,
         flux_handle,

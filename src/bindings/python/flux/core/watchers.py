@@ -101,6 +101,20 @@ def timeout_handler_wrapper(unused1, unused2, revents, opaque_handle):
 
 
 class TimerWatcher(Watcher):
+    """A Flux Watcher which monitors for timer events
+
+    A TimerWatcher monitors for timer events which occur when ``after`` seconds
+    have elapsed, and optionally again every ``repeat`` seconds. When these
+    events occur, the supplied `callback` is invoked, and is passed the
+    optional ``*args`` and ``**kwargs`` supplied in the constructor.
+
+    The callback has the signature::
+
+        callback (flux_handle, watcher, revents, *args, **kwargs)
+
+    For more information see the ``flux_timer_watcher_create(3)`` manpage.
+    """
+
     def __init__(self, flux_handle, after, callback, *args, repeat=0, **kwargs):
         self.flux_handle = flux_handle
         self.after = after
@@ -149,6 +163,26 @@ def fd_handler_wrapper(unused1, unused2, revents, opaque_handle):
 
 
 class FDWatcher(Watcher):
+    """A Flux Watcher which monitors for file descriptor events
+
+    An FDWatcher monitors for events on the file descriptor ``fd_int``. The
+    supplied ``events`` is a bitmask of events for which to monitor including
+    ``flux.constants.FLUX_POLLIN``, ``flux.constants.FLUX_POLLOUT`` and
+    ``flux.constants.FLUX_POLLERR``. When an event occurs the supplied
+    ``callback`` is called, and is passed any of the optional ``*args`` or
+    keyword ``**kwargs``.
+
+    The callback has the signature::
+
+        callback(flux_handle, watcher, fd, revents, *args, **kwargs)
+
+    A bit set in ``events`` indicates interest in monitoring for that type
+    of event. A bit set in ``revents`` of the callback indicates that an
+    event of this type has occurred.
+
+    For more information see the ``flux_fd_watcher_create(3)`` man page.
+    """
+
     def __init__(self, flux_handle, fd_int, events, callback, *args, **kwargs):
         self.flux_handle = flux_handle
         self.fd_int = fd_int
@@ -194,6 +228,19 @@ def signal_handler_wrapper(_unused1, _unused2, _unused3, opaque_handle):
 
 
 class SignalWatcher(Watcher):
+    """A Flux Watcher which monitors for signal events
+
+    A SignalWatcher monitors for the receipt of a signal ``signal_int``.
+    If the specified signal is receieved, then the supplied ``callback`` is
+    called with the optional ``*args`` and keyword args ``**kwargs``.
+
+    The callback has the signature::
+
+        callback(flux_handle, watcher, signal, *args, **kwargs)
+
+    For more information see ``flux_signal_watcher_create(3)``.
+    """
+
     def __init__(self, flux_handle, signal_int, callback, *args, **kwargs):
         self.flux_handle = flux_handle
         self.signal_int = signal_int

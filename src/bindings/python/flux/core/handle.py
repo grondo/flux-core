@@ -229,17 +229,21 @@ class Flux(Wrapper):
         match_tag=raw.FLUX_MATCHTAG_NONE,
         **kwargs,
     ):
+        """Create a :func:`~flux.message.MessageWatcher`"""
         return MessageWatcher(
             self, type_mask, callback, *args, topic_glob, match_tag, **kwargs
         )
 
     def timer_watcher_create(self, after, callback, *args, repeat=0.0, **kwargs):
+        """Create a :func:`~flux.core.watchers.TimerWatcher`"""
         return TimerWatcher(self, after, callback, repeat=repeat, *args, **kwargs)
 
     def signal_watcher_create(self, signum, callback, *args, **kwargs):
+        """Create a :func:`~flux.core.watchers.SignalWatcher`"""
         return SignalWatcher(self, signum, callback, *args, **kwargs)
 
     def fd_watcher_create(self, fd_int, callback, *args, events=None, **kwargs):
+        """Create an :func:`~flux.core.watchers.FDWatcher`"""
         if events is None:
             events = FLUX_POLLIN | FLUX_POLLOUT | FLUX_POLLERR
         return FDWatcher(self, fd_int, events, callback, *args, **kwargs)
