@@ -130,6 +130,12 @@ matrix = BuildMatrix()
 # Ubuntu: no args
 matrix.add_build(name="bionic")
 
+# Ubuntu: 32b
+matrix.add_build(
+    name="bionic - 32 bit",
+    command_args="--platform linux/386",
+)
+
 # Ubuntu: gcc-8, content-s3, distcheck
 matrix.add_build(
     name="bionic - gcc-8,content-s3,distcheck",
