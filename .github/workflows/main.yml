@@ -143,6 +143,8 @@ jobs:
       with:
         install: true
 
+    - uses: mxschmitt/action-tmate@v3
+
     - name: docker-run-checks
       env: ${{matrix.env}}
       run: ${{matrix.command}}
