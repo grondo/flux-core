@@ -94,6 +94,11 @@ TOP=$(git rev-parse --show-toplevel 2>&1) \
     || die "not inside $PROJECT git repository!"
 which docker >/dev/null \
     || die "unable to find a docker binary"
+if docker buildx >/dev/null 2>&1; then
+    DOCKER_BUILD="docker buildx build --load"
+else
+    DOCKER_BUILD="docker build"
+fi
 
 # distcheck incompatible with some configure args
 if test "$DISTCHECK" = "t"; then
@@ -121,7 +126,7 @@ else
 fi
 
 checks_group "Building image $IMAGE for user $USER $(id -u) group=$(id -g)" \
-  docker build \
+  ${DOCKER_BUILD} \
     ${PLATFORM} \
     ${NO_CACHE} \
     ${QUIET} \
