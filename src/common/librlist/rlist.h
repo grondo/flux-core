@@ -222,6 +222,10 @@ int rlist_verify (rlist_error_t *error,
 struct rlist * rlist_alloc (struct rlist *rl, const char *mode,
                             int nnodes, int slot_size, int nslots);
 
+/*  Return true if allocation is feasible for rlist rl
+ */
+bool rlist_alloc_feasible (const struct rlist *rl, const char *mode,
+                           int nnodes, int slots, int slotsz);
 
 /*  Mark rlist "alloc" as allocated in rlist "rl".
  */

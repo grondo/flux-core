@@ -1581,8 +1581,8 @@ static struct rlist *rlist_try_alloc (struct rlist *rl, const char *mode,
 
 /*  Determine if allocation request is feasible for rlist `rl`.
  */
-static bool rlist_alloc_feasible (const struct rlist *rl, const char *mode,
-                                  int nnodes, int slots, int slotsz)
+bool rlist_alloc_feasible (const struct rlist *rl, const char *mode,
+                           int nnodes, int slots, int slotsz)
 {
     bool rc = false;
     struct rlist *result = NULL;
