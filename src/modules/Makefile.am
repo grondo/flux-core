@@ -14,7 +14,8 @@ SUBDIRS = \
  job-exec \
  job-archive \
  resource \
- sched-simple
+ sched-simple \
+ derp
 
 if ENABLE_CONTENT_S3
 SUBDIRS += content-s3

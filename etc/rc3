@@ -32,6 +32,7 @@ modrm 0 job-list
 modrm all job-info
 modrm 0 job-manager
 modrm all job-ingest
+modrm all derp
 
 modrm 0 cron
 modrm all barrier

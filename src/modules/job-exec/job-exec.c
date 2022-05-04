@@ -105,9 +105,11 @@ static double kill_timeout=5.0;
 
 extern struct exec_implementation testexec;
 extern struct exec_implementation bulkexec;
+extern struct exec_implementation derpexec;
 
 static struct exec_implementation * implementations[] = {
     &testexec,
+    &derpexec,
     &bulkexec,
     NULL
 };

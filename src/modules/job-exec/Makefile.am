@@ -33,7 +33,8 @@ job_exec_la_SOURCES = \
 	rset.c \
 	rset.h \
 	testexec.c \
-	exec.c
+	exec.c \
+	derp.c
 
 job_exec_la_LDFLAGS = \
 	$(fluxmod_ldflags) \

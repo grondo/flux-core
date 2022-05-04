@@ -563,6 +563,7 @@ AC_CONFIG_FILES( \
   src/modules/job-archive/Makefile \
   src/modules/sched-simple/Makefile \
   src/modules/resource/Makefile \
+  src/modules/derp/Makefile \
   src/test/Makefile \
   etc/Makefile \
   etc/flux-core.pc \
