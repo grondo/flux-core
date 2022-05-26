@@ -33,6 +33,7 @@ struct derp_ctx {
     zhashx_t *jobs;
 
     zhashx_t *actions;
+    zhashx_t *notifications;
 };
 
 typedef int (*derp_action_f) (void *arg,
@@ -40,14 +41,24 @@ typedef int (*derp_action_f) (void *arg,
                               const char *idset,
                               json_t *data);
 
+typedef void (*derp_notify_f) (flux_t *h,
+                               const flux_msg_t *msg,
+                               json_t *data,
+                               void *arg);
+
 
 /*  Register action for handling messages of 'type'
  */
-int derp_register (struct derp_ctx *ctx,
-                   const char *type,
-                   derp_action_f fn,
-                   flux_free_f free_fn,
-                   void *arg);
+int derp_register_action (struct derp_ctx *ctx,
+                          const char *type,
+                          derp_action_f fn,
+                          flux_free_f free_fn,
+                          void *arg);
+
+int derp_register_notify (struct derp_ctx *ctx,
+                          const char *type,
+                          derp_notify_f fn,
+                          void *arg);
 
 /*  Forward a message of 'type' addressed to 'ranks' downstream
  *   (via hello protocol response)

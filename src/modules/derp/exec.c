@@ -36,9 +36,7 @@ struct exec {
     struct idset *idset;        // Idset of this rank plus all downstream peers
     struct hello_responder *hr;
 
-    flux_watcher_t *prep;
-    flux_watcher_t *check;
-    flux_watcher_t *idle;
+    flux_watcher_t *hr_timer;
 
     flux_msg_handler_t **handlers;
 };
@@ -63,14 +61,16 @@ static void exec_verror (struct derp_job *job, const char *fmt, va_list ap)
         note [len-1] = '\0';
     }
     if (!(f = flux_rpc_pack (h,
-                            "derp.exception",
+                            "derp.notify",
                             0,
                             0,
-                            "{s:I s:i s:s s:s}",
-                            "id", job->id,
-                            "severity", 0,
-                            "type", "exec",
-                            "note", note)))
+                            "{s:s s:{s:I s:i s:s s:s}}",
+                            "type", "exception",
+                            "data",
+                              "id", job->id,
+                              "severity", 0,
+                              "type", "exec",
+                              "note", note)))
         flux_log_error (h,
                         "%ju: failed to send exception: %s",
                         (uintmax_t) job->id,
@@ -128,13 +128,15 @@ static int exec_notify_finish (struct derp_job *job)
                       (uintmax_t) job->id,
                       ranks);
             f = flux_rpc_pack (h,
-                              "derp.finish",
+                              "derp.notify",
                                FLUX_NODEID_UPSTREAM,
                                FLUX_RPC_NORESPONSE,
-                              "{s:I s:s s:i}",
-                              "id", job->id,
-                              "ranks", ranks,
-                              "status", job->status);
+                              "{s:s s:{s:I s:s s:i}}",
+                              "type", "finish",
+                              "data",
+                                "id", job->id,
+                                "ranks", ranks,
+                                "status", job->status);
             free (ranks);
             if (!f) {
                 exec_error (job,
@@ -243,10 +245,12 @@ static int exec_notify_start (struct derp_job *job)
                       (uintmax_t) job->id,
                       ranks);
             f = flux_rpc_pack (h,
-                               "derp.started",
+                               "derp.notify",
                                FLUX_NODEID_UPSTREAM,
                                FLUX_RPC_NORESPONSE,
-                               "{s:I s:s}",
+                               "{s:s s:{s:I s:s}}",
+                               "type", "start",
+                               "data",
                                "id", job->id,
                                "ranks", ranks);
             free (ranks);
@@ -328,6 +332,11 @@ static void exec_barrier_complete (flux_future_t *f, void *arg)
     struct derp_job *job = arg;
     flux_t *h = job->exec->ctx->h;
 
+    if (f && flux_future_get (f, NULL) < 0) {
+        flux_log (job->exec->ctx->h, LOG_ERR, "barrier failed");
+        exec_error (job, "barrier failure: %s", flux_future_error_string (f));
+        return;
+    }
     flux_log (h,
               LOG_DEBUG,
               "%ju: barrier %d complete",
@@ -357,14 +366,28 @@ static int exec_barrier_check (struct derp_job *job)
 {
     flux_t *h = job->exec->ctx->h;
     flux_future_t *f = NULL;
+    char *s;
+
+    s = idset_encode (job->barrier->ranks, IDSET_FLAG_RANGE);
+    flux_log (h,
+              LOG_DEBUG,
+              "%ju: exec_barrier_check: complete on %s",
+              (uintmax_t) job->id,
+              s);
+    free (s);
 
     if (idset_equal (job->barrier->ranks, job->subtree_ranks)) {
+        /*  Barrier is complete locally, if this is the lowest common
+         *   ancestor for the whole job, then notify all downstream
+         *   members via exec_barrier_complete(). O/w, just notify
+         *   downstream.
+         */
         if (idset_equal (job->ranks, job->subtree_ranks)) {
             flux_log (h,
                       LOG_DEBUG, "%ju: barrier %d complete on LCA\n",
                       (uintmax_t) job->id,
                       job->barrier->sequence);
-            exec_barrier_complete (f, job);
+            exec_barrier_complete (NULL, job);
             return 0;
         }
         flux_log (h,
@@ -583,7 +606,7 @@ static void exec_kill (flux_t *h,
 
     flux_log (h,
               LOG_DEBUG,
-              "%ju: targets=%s: exec_start request received",
+              "%ju: targets=%s: kill request received",
               (uintmax_t) id,
               ranks);
 
@@ -685,7 +708,10 @@ static void exec_start (flux_t *h,
             flux_log_error (h, "hello_responder_push");
             goto error;
         }
-        flux_watcher_start (exec->prep);
+        if (hello_responder_count (exec->hr) == 1) {
+            flux_timer_watcher_reset (exec->hr_timer, 0.02, 0.);
+            flux_watcher_start (exec->hr_timer);
+        }
     }
 
     /* Register job */
@@ -708,37 +734,33 @@ error:
  *   { "id":I "ranks":s }
  */
 static void exec_started (flux_t *h,
-                          flux_msg_handler_t *mh,
                           const flux_msg_t *msg,
+                          json_t *data,
                           void *arg)
 {
     struct exec *exec = arg;
     const char *ranks;
     flux_jobid_t id;
 
-    if (flux_request_unpack (msg,
-                             NULL,
-                             "{s:I s:s}",
-                             "id", &id,
-                             "ranks", &ranks) < 0) {
+    if (json_unpack (data, "{s:I s:s}", "id", &id, "ranks", &ranks) < 0)
         goto error;
-    }
     if (exec_job_started (exec, id, ranks) < 0)
         goto error;
     return;
 error:
+    flux_log_error (h, "exec_started");
     if (flux_respond_error (h, msg, errno, NULL) < 0)
         flux_log_error (h, "exec_started: flux_respond_error");
 }
 
 /*  Handle 'barrier' request from downstream peer(s)
  *
- *  Payload:
+ *  Data:
  *   { "id":I "seq":i "ranks":s }
  */
 static void exec_barrier (flux_t *h,
-                          flux_msg_handler_t *mh,
                           const flux_msg_t *msg,
+                          json_t *data,
                           void *arg)
 {
     struct exec *exec = arg;
@@ -746,12 +768,11 @@ static void exec_barrier (flux_t *h,
     flux_jobid_t id;
     struct derp_job *job = NULL;
 
-    if (flux_request_unpack (msg,
-                             NULL,
-                             "{s:I s:s}",
-                             "id", &id,
-                             "ranks", &ranks) < 0)
+    if (json_unpack (data, "{s:I s:s}", "id", &id, "ranks", &ranks) < 0) {
+        flux_log_error (h, "flux_request_unpack: %s",
+                        flux_msg_last_error (msg));
         goto error;
+    }
     if (!(job = zhashx_lookup (exec->jobs, &id))) {
         errno = ENOENT;
         goto error;
@@ -779,8 +800,8 @@ error:
  *   { "id":I "ranks":s "status":i }
  */
 static void exec_finish (flux_t *h,
-                         flux_msg_handler_t *mh,
                          const flux_msg_t *msg,
+                         json_t *data,
                          void *arg)
 {
     struct exec *exec = arg;
@@ -788,12 +809,11 @@ static void exec_finish (flux_t *h,
     flux_jobid_t id;
     int status;
 
-    if (flux_request_unpack (msg,
-                             NULL,
-                             "{s:I s:s s:i}",
-                             "id", &id,
-                             "ranks", &ranks,
-                             "status", &status) < 0) {
+    if (json_unpack (data,
+                     "{s:I s:s s:i}",
+                     "id", &id,
+                     "ranks", &ranks,
+                     "status", &status) < 0) {
         flux_log (h, LOG_ERR, "exec_finish: %s", flux_msg_last_error (msg));
         goto error;
     }
@@ -812,8 +832,8 @@ error:
  *   { "id":I "ranks":s }
  */
 static void exec_release (flux_t *h,
-                          flux_msg_handler_t *mh,
                           const flux_msg_t *msg,
+                          json_t *data,
                           void *arg)
 {
     flux_respond_error (h, msg, ENOTSUP, NULL);
@@ -826,8 +846,8 @@ static void exec_release (flux_t *h,
  *   { "id":I "severity":i "type":s "note":s }
  */
 static void exec_exception (flux_t *h,
-                            flux_msg_handler_t *mh,
                             const flux_msg_t *msg,
+                            json_t *data,
                             void *arg)
 {
     struct exec *exec = arg;
@@ -848,13 +868,12 @@ static void exec_exception (flux_t *h,
 
     /*  Unpack exception data
      */
-    if (flux_request_unpack (msg,
-                             NULL,
-                             "{s:I s:i s:s s:s}",
-                             "id", &id,
-                             "severity", &severity,
-                             "type", &type,
-                             "note", &note) < 0) {
+    if (json_unpack (data,
+                     "{s:I s:i s:s s:s}",
+                     "id", &id,
+                     "severity", &severity,
+                     "type", &type,
+                     "note", &note) < 0) {
         flux_log (h, LOG_ERR, "exec_exception: %s", flux_msg_last_error (msg));
         return;
     }
@@ -886,38 +905,28 @@ static void exec_exception (flux_t *h,
                                "note", note) < 0)
             flux_log_error (h, "exec_exception: flux_respond");
     }
-}
 
-static void exec_watchers_stop (struct exec *exec)
-{
-    flux_watcher_stop (exec->prep);
-    flux_watcher_stop (exec->check);
-}
-
-static void prep_cb (flux_reactor_t *r,
-                     flux_watcher_t *w,
-                     int revents,
-                     void *arg)
-{
-    struct exec *exec = arg;
-    if (hello_responder_count (exec->hr) > 0) {
-        flux_watcher_start (exec->idle);
-        flux_watcher_start (exec->check);
+    /* Kill job */
+    char *ranks = idset_encode (job->subtree_ranks, IDSET_FLAG_RANGE);
+    if (severity == 0
+        && derp_forward (exec->ctx,
+                         "kill",
+                         ranks,
+                         "{s:I s:i}",
+                         "id", job->id,
+                         "signal", SIGTERM) < 0) {
+        flux_log_error (h, "exec_exception: derp_forward: kill");
     }
-    else
-        exec_watchers_stop (exec);
+    free (ranks);
 }
 
-static void check_cb (flux_reactor_t *r,
+static void timer_cb (flux_reactor_t *r,
                       flux_watcher_t *w,
                       int revents,
                       void *arg)
 {
     struct exec *exec = arg;
     struct hello_response *hresp;
-
-    flux_watcher_stop (exec->idle);
-    flux_watcher_stop (exec->check);
 
     flux_log (exec->ctx->h,
               LOG_DEBUG,
@@ -932,6 +941,7 @@ static void check_cb (flux_reactor_t *r,
         if (rc < 0)
             flux_log_error (exec->ctx->h, "peer_forward_response");
     }
+    flux_watcher_stop (w);
 }
 
 static void exec_ctx_destroy (struct exec *exec)
@@ -941,9 +951,7 @@ static void exec_ctx_destroy (struct exec *exec)
         zhashx_destroy (&exec->jobs);
         idset_destroy (exec->idset);
         hello_responder_destroy (exec->hr);
-        flux_watcher_destroy (exec->prep);
-        flux_watcher_destroy (exec->check);
-        flux_watcher_destroy (exec->idle);
+        flux_watcher_destroy (exec->hr_timer);
         flux_msg_handler_delvec (exec->handlers);
         free (exec);
         errno = saved_errno;
@@ -963,36 +971,6 @@ static const struct flux_msg_handler_spec htab[] = {
         .cb = exec_kill,
         .rolemask = 0
     },
-    {
-        .typemask = FLUX_MSGTYPE_REQUEST,
-        .topic_glob = "derp.started",
-        .cb = exec_started,
-        .rolemask = 0
-    },
-    {
-        .typemask = FLUX_MSGTYPE_REQUEST,
-        .topic_glob = "derp.barrier-enter",
-        .cb = exec_barrier,
-        .rolemask = 0
-    },
-    {
-        .typemask = FLUX_MSGTYPE_REQUEST,
-        .topic_glob = "derp.finish",
-        .cb = exec_finish,
-        .rolemask = 0
-    },
-    {
-        .typemask = FLUX_MSGTYPE_REQUEST,
-        .topic_glob = "derp.release",
-        .cb = exec_release,
-        .rolemask = 0
-    },
-    {
-        .typemask = FLUX_MSGTYPE_REQUEST,
-        .topic_glob = "derp.exception",
-        .cb = exec_exception,
-        .rolemask = 0
-    },
     FLUX_MSGHANDLER_TABLE_END
 };
 
@@ -1007,15 +985,16 @@ static struct exec * exec_ctx_create (struct derp_ctx *ctx)
     if (!(exec->jobs = derp_job_hash_create ())
         || !(exec->idset = idset_copy (ctx->peers->idset))
         || !(exec->hr = hello_responder_create ())
-        || !(exec->prep = flux_prepare_watcher_create (r, prep_cb, exec))
-        || !(exec->check = flux_check_watcher_create (r, check_cb, exec))
-        || !(exec->idle = flux_idle_watcher_create (r, NULL, NULL)))
+        || !(exec->hr_timer = flux_timer_watcher_create (r,
+                                                         0.01,
+                                                         0.,
+                                                         timer_cb,
+                                                         exec)))
         goto error;
     if (idset_set (exec->idset, exec->ctx->rank) < 0)
         goto error;
     if (flux_msg_handler_addvec (ctx->h, htab, exec, &exec->handlers) < 0)
         goto error;
-    flux_watcher_start (exec->prep);
     return exec;
 error:
     exec_ctx_destroy (exec);
@@ -1027,13 +1006,17 @@ int exec_init (struct derp_ctx *ctx)
     struct exec *exec = exec_ctx_create (ctx);
     if (!exec)
         return -1;
-    if (derp_register (ctx,
-                       "state-update",
-                       exec_state_update,
-                       (flux_free_f) exec_ctx_destroy,
-                       exec) < 0)
-        return -1;
-    if (derp_register (ctx, "kill", derp_exec_kill, NULL, exec) < 0)
+    if (derp_register_action (ctx,
+                              "state-update",
+                              exec_state_update,
+                              (flux_free_f) exec_ctx_destroy,
+                              exec) < 0
+        || derp_register_action (ctx, "kill", derp_exec_kill, NULL, exec) < 0
+        || derp_register_notify (ctx, "start", exec_started, exec) < 0
+        || derp_register_notify (ctx, "barrier-enter", exec_barrier, exec) < 0
+        || derp_register_notify (ctx, "finish", exec_finish, exec) < 0
+        || derp_register_notify (ctx, "release", exec_release, exec) < 0
+        || derp_register_notify (ctx, "exception", exec_exception, exec) < 0)
         return -1;
     return 0;
 }

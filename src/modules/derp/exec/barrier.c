@@ -71,9 +71,10 @@ int barrier_enter (struct barrier *barrier,
 
     if (flux_request_unpack (msg,
                              NULL,
-                             "{s:s s:i}",
-                             "ranks", &ranks,
-                             "seq", &sequence) < 0)
+                             "{s:{s:s s:i}}",
+                             "data",
+                               "ranks", &ranks,
+                               "seq", &sequence) < 0)
         return -1;
     if (sequence != barrier->sequence) {
         errno = EINVAL;
@@ -106,13 +107,17 @@ flux_future_t * barrier_notify (flux_t *h,
     if (!(ranks = idset_encode (barrier->ranks, IDSET_FLAG_RANGE)))
         return NULL;
     f = flux_rpc_pack (h,
-                       "derp.barrier-enter",
+                       "derp.notify",
                        FLUX_NODEID_UPSTREAM,
                        0,
-                       "{s:I s:s s:i}",
-                       "id", id,
-                       "ranks", ranks,
-                       "seq", barrier->sequence);
+                       "{s:s s:{s:I s:s s:i}}",
+                       "type", "barrier-enter",
+                       "data",
+                         "id", id,
+                         "ranks", ranks,
+                         "seq", barrier->sequence);
+    if (!f)
+        flux_log_error (h, "barrier_notify: flux_rpc_pack");
     free (ranks);
     return f;
 }

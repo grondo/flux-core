@@ -29,6 +29,11 @@ struct derp_action {
     void *        arg;
 };
 
+struct derp_notify {
+    derp_notify_f fn;
+    void *arg;
+};
+
 static void derp_action_destroy (struct derp_action *action)
 {
     if (action) {
@@ -61,6 +66,34 @@ static struct derp_action * derp_action_create (derp_action_f fn,
     return action;
 }
 
+static void derp_notify_destroy (struct derp_notify *notify)
+{
+    if (notify) {
+        int saved_errno = errno;
+        free (notify);
+        errno = saved_errno;
+    }
+}
+
+static void derp_notify_destructor (void **item)
+{
+    if (item) {
+        derp_notify_destroy (*item);
+        *item = NULL;
+    }
+}
+
+static struct derp_notify * derp_notify_create (derp_notify_f fn, void *arg)
+{
+    struct derp_notify *notify;
+    if (!(notify = calloc (1, sizeof (*notify))))
+        return NULL;
+    notify->fn = fn;
+    notify->arg = arg;
+    return notify;
+}
+
+
 static void derp_ctx_destroy (struct derp_ctx *ctx)
 {
     if (ctx) {
@@ -69,6 +102,7 @@ static void derp_ctx_destroy (struct derp_ctx *ctx)
         json_decref (ctx->topology);
         zhashx_destroy (&ctx->jobs);
         zhashx_destroy (&ctx->actions);
+        zhashx_destroy (&ctx->notifications);
         flux_future_destroy (ctx->hello_f);
         flux_msg_handler_delvec (ctx->handlers);
         free (ctx);
@@ -112,10 +146,12 @@ static struct derp_ctx *derp_ctx_create (flux_t *h)
     if (!(ctx->peers = peers_create (topology))
         || !(ctx->hr = hello_responder_create ())
         || !(ctx->jobs = derp_job_hash_create ())
-        || !(ctx->actions = zhashx_new ()))
+        || !(ctx->actions = zhashx_new ())
+        || !(ctx->notifications = zhashx_new ()))
         goto error;
 
     zhashx_set_destructor (ctx->actions, derp_action_destructor);
+    zhashx_set_destructor (ctx->notifications, derp_notify_destructor);
 
     return ctx;
 error:
@@ -160,11 +196,11 @@ int derp_forward (struct derp_ctx *ctx,
 
 }
 
-int derp_register (struct derp_ctx *ctx,
-                   const char *type,
-                   derp_action_f fn,
-                   flux_free_f free_fn,
-                   void *arg)
+int derp_register_action (struct derp_ctx *ctx,
+                          const char *type,
+                          derp_action_f fn,
+                          flux_free_f free_fn,
+                          void *arg)
 {
     struct derp_action *action = derp_action_create (fn, free_fn, arg);
     if (!action)
@@ -172,6 +208,22 @@ int derp_register (struct derp_ctx *ctx,
     if (zhashx_insert (ctx->actions, type, action) < 0) {
         errno = EEXIST;
         derp_action_destroy (action);
+        return -1;
+    }
+    return 0;
+}
+
+int derp_register_notify (struct derp_ctx *ctx,
+                          const char *type,
+                          derp_notify_f fn,
+                          void *arg)
+{
+    struct derp_notify *notify = derp_notify_create (fn, arg);
+    if (!notify)
+        return -1;
+    if (zhashx_insert (ctx->notifications, type, notify) < 0) {
+        errno = EEXIST;
+        derp_notify_destroy (notify);
         return -1;
     }
     return 0;
@@ -246,6 +298,32 @@ error:
     return -1;
 }
 
+static void derp_notify_cb (flux_t *h,
+                            flux_msg_handler_t *mh,
+                            const flux_msg_t *msg,
+                            void *arg)
+{
+    struct derp_ctx *ctx = arg;
+    struct derp_notify *notify;
+    const char *type;
+    json_t *data;
+
+    if (flux_request_unpack (msg,
+                             NULL,
+                             "{s:s s:o}",
+                             "type", &type,
+                             "data", &data) < 0) {
+        flux_log_error (h,"derp.notify: %s", flux_msg_last_error (msg));
+        return;
+    }
+
+    if ((notify = zhashx_lookup (ctx->notifications, type))) {
+        (*notify->fn) (h, msg, data, notify->arg);
+    }
+    else
+        flux_log (h, LOG_ERR, "dropped notification with type=%s", type);
+}
+
 static void derp_hello_cb (flux_t *h,
                            flux_msg_handler_t *mh,
                            const flux_msg_t *msg,
@@ -303,6 +381,12 @@ static const struct flux_msg_handler_spec htab[] = {
         .typemask = FLUX_MSGTYPE_REQUEST,
         .topic_glob = "derp.hello",
         .cb = derp_hello_cb,
+        .rolemask = 0
+    },
+    {
+        .typemask = FLUX_MSGTYPE_REQUEST,
+        .topic_glob = "derp.notify",
+        .cb = derp_notify_cb,
         .rolemask = 0
     },
     {

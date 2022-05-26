@@ -72,10 +72,12 @@ static int ping_respond (struct ping *ping)
                   "ping: %s complete. notifying upstream",
                   ranks);
         if (!(f = flux_rpc_pack (ctx->h,
-                                 "derp.ping-reply",
+                                 "derp.notify",
                                  FLUX_NODEID_UPSTREAM,
                                  FLUX_RPC_NORESPONSE,
-                                 "{s:s}",
+                                 "{s:s s:{s:s}}",
+                                 "type", "ping-reply",
+                                 "data",
                                  "ranks", ranks))) {
             flux_log_error (ctx->h, "ping_try_response: flux_rpc");
             goto error;
@@ -107,6 +109,11 @@ static int ping_handler (void *arg,
                          json_t *data)
 {
     struct ping *ping = arg;
+
+    flux_log (ping->ctx->h,
+              LOG_DEBUG,
+              "ping_handler: idset=%s",
+              idset);
 
     if (!(ping->idset = idset_decode (idset))
         || !(ping->reply_idset = idset_create (0, IDSET_FLAG_AUTOGROW)))
@@ -200,22 +207,24 @@ error:
 }
 
 static void ping_reply (flux_t *h,
-                        flux_msg_handler_t *mh,
                         const flux_msg_t *msg,
+                        json_t *data,
                         void *arg)
 {
     int rc;
     char *s;
     struct ping *ping = arg;
-    const char *ranks;
+    const char *ranks = NULL;
     struct idset *idset = NULL;
 
     /*  This is a ping reply from indicated 'ranks'
      *  It comes as a request so we have to unpack it as such:
      */
-    if (flux_request_unpack (msg, NULL, "{s:s}", "ranks", &ranks) < 0
+    if (json_unpack (data, "{s:s}", "ranks", &ranks) < 0
         || !(idset = idset_decode (ranks))) {
-        flux_log_error (h, "ping_response: failed to get ping resp ranks");
+        flux_log_error (h,
+                        "ping_response: failed to get ping resp ranks: %s",
+                        flux_msg_last_error (msg));
         return;
     }
     rc = idset_add (ping->reply_idset, idset);
@@ -243,12 +252,6 @@ static const struct flux_msg_handler_spec htab[] = {
         .typemask = FLUX_MSGTYPE_REQUEST,
         .topic_glob = "derp.ping",
         .cb = ping_request,
-        .rolemask = 0
-    },
-    {
-        .typemask = FLUX_MSGTYPE_REQUEST,
-        .topic_glob = "derp.ping-reply",
-        .cb = ping_reply,
         .rolemask = 0
     },
     FLUX_MSGHANDLER_TABLE_END
@@ -285,9 +288,14 @@ int ping_init (struct derp_ctx *ctx)
     struct ping *ping = ping_ctx_create (ctx);
     if (!ping)
         return -1;
-    return derp_register (ctx,
+    derp_register_action (ctx,
                           "ping",
                           ping_handler,
                           (flux_free_f) ping_ctx_destroy,
                           ping);
+    derp_register_notify (ctx,
+                          "ping-reply",
+                          ping_reply,
+                          ping);
+    return 0;
 }
