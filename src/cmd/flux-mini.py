@@ -1730,6 +1730,16 @@ class AllocCmd(MiniCmd):
             help="Wait for new instance to start, but do not attach to it.",
         )
         self.parser.add_argument(
+            "--timing",
+            action="store_true",
+            help="Test-only: dump timing and cancel job",
+        )
+        self.parser.add_argument(
+            "--timing-header",
+            action="store_true",
+            help="Test-only: with --timing, also print timing header",
+        )
+        self.parser.add_argument(
             "COMMAND",
             nargs=argparse.REMAINDER,
             help="Set the initial COMMAND of new Flux instance."
@@ -1793,11 +1803,18 @@ class AllocCmd(MiniCmd):
 
         if not self.t0:
             self.t0 = event.timestamp
+            self.t_alloc = 0
+
         ts = event.timestamp - self.t0
 
-        if args.verbose and event.name == "alloc":
-            self.log(jobid, ts, "resources allocated")
+        if event.name == "alloc":
+            if args.timing:
+                self.t_alloc = event.timestamp
+            if args.verbose:
+                self.log(jobid, ts, "resources allocated")
         if event.name == "memo" and "uri" in event.context:
+            self.t_uri = event.timestamp
+            self.uri = event.context["uri"]
             if args.verbose:
                 self.log(jobid, ts, "waiting for instance")
 
@@ -1813,8 +1830,44 @@ class AllocCmd(MiniCmd):
             except OSError:
                 raise OSError(f"{jobid}: instance startup failed")
 
+            self.t_ready = time.time()
+
             if args.verbose:
                 self.log(jobid, time.time() - self.t0, "ready")
+            if args.timing:
+                #  Shutdown job, print timing results and exit.:wq
+                size = child_handle.attr_get("size")
+                fanout = child_handle.attr_get("tbon.fanout")
+                child_handle.rpc("shutdown.start", {"loglevel": 0}).get()
+                if args.verbose:
+                    self.log(jobid, time.time() - self.t0, "shutdown")
+                if args.timing_header:
+                    print(
+                        "%5s %5s %5s %10s %10s %10s %10s %10s"
+                        % (
+                            "NODES",
+                            "SIZE",
+                            "FNOUT",
+                            "T_ALLOC",
+                            "T_URI",
+                            "T_READY",
+                            "(TOTAL)",
+                            "T_SHUTDOWN",
+                        )
+                    )
+                print(
+                    "%5s %5s %5s %10.4f %10.4f %10.4f %10.4f %10.4f"
+                    % (
+                        args.nodes,
+                        size,
+                        fanout,
+                        self.t_alloc - self.t0,
+                        self.t_uri - self.t_alloc,
+                        self.t_ready - self.t_uri,
+                        self.t_ready - self.t0,
+                        time.time() - self.t_ready,
+                    )
+                )
             self.flux_handle.reactor_stop()
 
     def background(self, args, jobid):
@@ -1837,7 +1890,8 @@ class AllocCmd(MiniCmd):
             job.cancel(self.flux_handle, jobid)
             sys.exit(1)
 
-        print(jobid)
+        if not args.timing:
+            print(jobid)
 
     def main(self, args):
         jobid = self.submit(args)
