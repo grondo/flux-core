@@ -180,6 +180,7 @@ static int jobspec_redacted_parse_queue (struct job *job)
 struct job *job_create_from_eventlog (flux_jobid_t id,
                                       const char *eventlog,
                                       const char *jobspec,
+                                      const char *R,
                                       flux_error_t *error)
 {
     struct job *job;
@@ -201,6 +202,13 @@ struct job *job_create_from_eventlog (flux_jobid_t id,
     if (jobspec_redacted_parse_queue (job) < 0) {
         errprintf (error, "failed to decode jobspec queue");
         goto inval;
+    }
+
+    if (R) {
+        if (!(job->R = json_loads (R, 0, NULL))) {
+            errprintf (error, "failed to decode R");
+            goto inval;
+        }
     }
 
     if (!(a = eventlog_decode (eventlog))) {
