@@ -90,6 +90,7 @@ struct jobinfo {
     flux_watcher_t       *expiration_timer;
 
     double                t0;        /* timestamp we initially saw this job */
+    flux_future_t *       R_watch_future;
 
     /* Exec implementation for this job */
     struct exec_implementation *impl;

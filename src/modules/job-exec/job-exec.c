@@ -126,6 +126,27 @@ void jobinfo_incref (struct jobinfo *job)
     job->refcount++;
 }
 
+static void jobinfo_R_watch_cancel (struct jobinfo *job)
+{
+    flux_future_t *f;
+
+    if (!job->R_watch_future)
+        return;
+
+    f = flux_rpc_pack (job->h,
+                       "job-info.update-watch-cancel",
+                       FLUX_NODEID_ANY,
+                       FLUX_RPC_NORESPONSE,
+                       "{s:i}",
+                       "matchtag",
+                       flux_rpc_get_matchtag (job->R_watch_future));
+    if (!f)
+        flux_log_error (job->h, "job-info.update-watch-cancel failed");
+    flux_future_destroy (f);
+    flux_future_destroy (job->R_watch_future);
+    job->R_watch_future = NULL;
+}
+
 void jobinfo_decref (struct jobinfo *job)
 {
     if (job && (--job->refcount == 0)) {
@@ -135,6 +156,7 @@ void jobinfo_decref (struct jobinfo *job)
         flux_watcher_destroy (job->kill_timer);
         flux_watcher_destroy (job->kill_shell_timer);
         flux_watcher_destroy (job->expiration_timer);
+        jobinfo_R_watch_cancel (job);
         zhashx_delete (job->ctx->jobs, &job->id);
         if (job->impl && job->impl->exit)
             (*job->impl->exit) (job);
@@ -803,6 +825,49 @@ static int jobinfo_start_execution (struct jobinfo *job)
     return 0;
 }
 
+static void R_update_cb (flux_future_t *f, void *arg)
+{
+    struct jobinfo *job = arg;
+    json_t *R;
+    json_error_t error;
+    struct resource_set *rset;
+
+    if (flux_rpc_get_unpack (f, "{s:o}", "R", &R) < 0) {
+        if (errno != ENODATA)
+            fprintf (stderr, "flux_rpc_get failed: %s\n", strerror (errno));
+        return;
+    }
+    if (!(rset = resource_set_create_fromjson (R, &error))) {
+        jobinfo_fatal_error (job, 0, "Invalid R update: %s", error.text);
+        flux_future_destroy (f);
+        return;
+    }
+    resource_set_destroy (job->R);
+    job->R = rset;
+    (void) jobinfo_set_expiration (job);
+    flux_future_reset (f);
+}
+
+static int jobinfo_watch_R (struct jobinfo *job)
+{
+    flux_future_t *f;
+    if (!(f = flux_rpc_pack (job->ctx->h,
+                             "job-info.update-watch",
+                             FLUX_NODEID_ANY,
+                             FLUX_RPC_STREAMING,
+                             "{s:I s:s s:i}",
+                             "id", job->id,
+                             "key", "R",
+                             "flags", 0))
+        || flux_future_then (f, -1., R_update_cb, job) < 0) {
+        jobinfo_fatal_error (job, errno, "Failed to watch job R");
+        flux_future_destroy (f);
+        return -1;
+    }
+    job->R_watch_future = f;
+    return 0;
+}
+
 static int jobinfo_load_implementation (struct jobinfo *job)
 {
     int i = 0;
@@ -852,6 +917,9 @@ static void jobinfo_start_continue (flux_future_t *f, void *arg)
         jobinfo_fatal_error (job, errno, "failed to start execution");
         goto done;
     }
+
+    jobinfo_watch_R (job);
+
 done:
     jobinfo_decref (job); /* clear init reference */
     flux_future_destroy (f);
