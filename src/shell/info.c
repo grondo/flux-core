@@ -29,13 +29,11 @@
 #include "info.h"
 #include "jobspec.h"
 
-/* Get R and jobspec from job-info.lookup future and assign.
+/* Get jobspec from job-info.lookup future and assign.
  * Return 0 on success, -1 on failure (and log error).
  * N.B. assigned values remain valid until future is destroyed.
  */
-static int lookup_job_info_get (flux_future_t *f,
-                                char **jobspec,
-                                const char **R)
+static int lookup_jobspec_get (flux_future_t *f, char **jobspec)
 {
     flux_error_t error;
     const char *J;
@@ -45,31 +43,78 @@ static int lookup_job_info_get (flux_future_t *f,
         shell_log_error ("failed to unwrap J: %s", error.text);
         return -1;
     }
-    if (flux_rpc_get_unpack (f, "{s:s}", "R", R) < 0)
-        goto error;
     return 0;
 error:
     shell_log_error ("job-info: %s", future_strerror (f, errno));
     return -1;
 }
 
-/* Fetch R and J from the job-info service.
+/* Fetch J from the job-info service.
  * Return future on success or NULL on failure (and log error).
  */
-static flux_future_t *lookup_job_info (flux_t *h, flux_jobid_t jobid)
+static flux_future_t *lookup_jobspec (flux_t *h, flux_jobid_t jobid)
 {
     flux_future_t *f;
     f = flux_rpc_pack (h,
                        "job-info.lookup",
                        FLUX_NODEID_ANY,
                        0,
-                       "{s:I s:[ss] s:i}",
+                       "{s:I s:[s] s:i}",
                        "id", jobid,
-                       "keys", "R", "J",
+                       "keys", "J",
                        "flags", 0);
     if (!f)
         shell_log_error ("error sending job-info request");
     return f;
+}
+
+static void resource_watch_update (struct shell_info *info)
+{
+    flux_future_t *f = info->R_watch_future;
+    json_t *R = NULL;
+    json_t *tmp_R;
+    rcalc_t *rcalc = NULL;
+    rcalc_t *tmp_rcalc;
+
+    if (flux_rpc_get_unpack (f, "{s:o}", "R", &R) < 0) {
+        shell_log_errno ("error getting R from job-info watch response");
+        goto out;
+    }
+    if (!(rcalc = rcalc_create_json (R))) {
+        shell_log_error ("error decoding R");
+        goto out;
+    }
+    /*  Swap previous and updated R, rcalc:
+     */
+    tmp_R = info->R;
+    info->R = json_incref (R);
+    R = tmp_R;
+
+    tmp_rcalc = info->rcalc;
+    info->rcalc = rcalc;
+    rcalc = tmp_rcalc;
+out:
+    rcalc_destroy (rcalc);
+    json_decref (R);
+    flux_future_reset (f);
+}
+
+static void R_update_cb (flux_future_t *f, void *arg)
+{
+    flux_shell_t *shell = arg;
+
+    resource_watch_update (shell->info);
+
+    /*  Destroy cached shell "info" JSON object otherwise plugins will
+     *  not see the updated R
+     */
+    (void) flux_shell_aux_set (shell, "shell::info", NULL, NULL);
+
+    /* Notify plugins that resources have been updated.
+     * (Assume plugins will emit appropriate error messages, so ignore
+     *  error from flux_shell_plugstack_call()).
+     */
+    (void) flux_shell_plugstack_call (shell, "shell.resource-update", NULL);
 }
 
 /*  Fetch jobinfo (jobspec, R) from job-info service if not provided on
@@ -82,7 +127,6 @@ static int shell_init_jobinfo (flux_shell_t *shell, struct shell_info *info)
     flux_future_t *f_hwloc = NULL;
     const char *xml;
     char *jobspec = NULL;
-    const char *R;
     json_error_t error;
 
     /*  fetch hwloc topology from resource module to avoid having to
@@ -96,9 +140,21 @@ static int shell_init_jobinfo (flux_shell_t *shell, struct shell_info *info)
                               0)))
         goto out;
 
-    /*  fetch jobspec (via J) and R for this job
+    /*  fetch R from job-info service
      */
-    if (!(f_info = lookup_job_info (shell->h, shell->jobid)))
+    if (!(info->R_watch_future = flux_rpc_pack (shell->h,
+                                                "job-info.update-watch",
+                                                FLUX_NODEID_ANY,
+                                                FLUX_RPC_STREAMING,
+                                                "{s:I s:s s:i}",
+                                                "id", shell->jobid,
+                                                "key", "R",
+                                                "flags", 0)))
+        goto out;
+
+    /*  fetch jobspec (via J) for this job
+     */
+    if (!(f_info = lookup_jobspec (shell->h, shell->jobid)))
         goto out;
 
     if (flux_rpc_get (f_hwloc, &xml) < 0
@@ -109,20 +165,26 @@ static int shell_init_jobinfo (flux_shell_t *shell, struct shell_info *info)
             goto out;
         }
     }
-    if (lookup_job_info_get (f_info, &jobspec, &R) < 0) {
-        shell_log_error ("error fetching jobspec,R");
+    if (lookup_jobspec_get (f_info, &jobspec) < 0) {
+        shell_log_error ("error fetching jobspec");
         goto out;
     }
     if (!(info->jobspec = jobspec_parse (jobspec, &error))) {
         shell_log_error ("error parsing jobspec: %s", error.text);
         goto out;
     }
-    if (!(info->R = json_loads (R, 0, &error))) {
-        shell_log_error ("error parsing R: %s", error.text);
-        goto out;
-    }
-    if (!(info->rcalc = rcalc_create_json (info->R))) {
-        shell_log_error ("error decoding R");
+
+    /*  Get initial version of R from initial job-info watch response:
+     */
+    resource_watch_update (info);
+
+    /*  Register callback for future R updates:
+     */
+    if (flux_future_then (info->R_watch_future,
+                          -1.,
+                          R_update_cb,
+                          shell) < 0) {
+        shell_log_errno ("error registering R watch callback");
         goto out;
     }
     rc = 0;
@@ -262,6 +324,7 @@ void shell_info_destroy (struct shell_info *info)
 {
     if (info) {
         int saved_errno = errno;
+        flux_future_destroy (info->R_watch_future);
         json_decref (info->R);
         jobspec_destroy (info->jobspec);
         rcalc_destroy (info->rcalc);
