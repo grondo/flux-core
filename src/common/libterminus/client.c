@@ -271,6 +271,15 @@ static void pty_client_data (struct flux_pty_client *c, flux_future_t *f)
         llog_error (c, "unpack: %s", error.text);
         return;
     }
+    /*  In the rare case where a pipe is used on stdin of a pty client
+     *  process, e.g.:
+     *
+     *    command | flux run -o pty.interactive ...`
+     *
+     *  STDIN_FILENO may end up closed, and further writes of pty data to
+     *  would then return EBADF. Therefore, use STDOUT_FILENO instead,
+     *  which is unlikely to end up closed.
+     */
     if (write (STDOUT_FILENO, data, len) < 0) {
         llog_error (c, "write %zu bytes: %s", len, strerror (errno));
         return;
