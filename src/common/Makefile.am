@@ -3,6 +3,8 @@ SUBDIRS = \
 	libtestutil \
 	libev \
 	libyuarel \
+	croaring \
+	libidset \
 	libpmi \
 	liblsd \
 	libutil \
@@ -11,7 +13,6 @@ SUBDIRS = \
 	libkvs \
 	libjob \
 	liboptparse \
-	libidset \
 	libtomlc99 \
 	libsubprocess \
 	libschedutil \
@@ -44,6 +45,7 @@ libflux_internal_la_LIBADD = \
 	$(builddir)/liblsd/liblsd.la \
 	$(builddir)/libccan/libccan.la \
 	$(builddir)/libutil/libutil.la \
+	$(builddir)/croaring/libcroaring.la \
 	$(builddir)/libidset/libidset.la \
 	$(builddir)/libev/libev.la \
 	$(builddir)/libyuarel/libyuarel.la \
@@ -122,6 +124,7 @@ libflux_optparse_la_LDFLAGS = \
 
 libflux_idset_la_SOURCES =
 libflux_idset_la_LIBADD = \
+	$(builddir)/croaring/libcroaring.la \
 	$(builddir)/libidset/libidset.la
 libflux_idset_la_LDFLAGS = \
 	-Wl,--version-script=$(srcdir)/libflux-idset.map \
@@ -161,6 +164,7 @@ libflux_taskmap_la_LIBADD = \
 	$(builddir)/libccan/libccan.la  \
 	$(builddir)/libtomlc99/libtomlc99.la  \
 	$(builddir)/libyuarel/libyuarel.la  \
+	$(builddir)/croaring/libcroaring.la \
 	libflux-core.la \
 	libflux-idset.la \
 	$(JANSSON_LIBS)
