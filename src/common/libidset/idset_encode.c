@@ -84,12 +84,13 @@ static int encode_ranged (const struct idset *idset,
     unsigned int id;
     unsigned int lo = 0;
     unsigned int hi = 0;
+    unsigned int last_id = 0;
     bool first = true;
 
-    lo = hi = id = vebsucc (idset->T, 0);
-    while (id < idset->T.M) {
-        unsigned int next = vebsucc (idset->T, id + 1);;
-        bool last = (next == idset->T.M);
+    lo = hi = id = idset_first (idset);
+    last_id = idset_last (idset);
+    while (id != IDSET_INVALID_ID) {
+        bool last = (id == last_id);
 
         if (first)                  // first iteration
             first = false;
@@ -106,7 +107,7 @@ static int encode_ranged (const struct idset *idset,
         }
         if (count < INT_MAX)
             count++;
-        id = next;
+        id = idset_next (idset, id);
     }
     return count;
 }
@@ -119,16 +120,17 @@ static int encode_simple (const struct idset *idset,
 {
     int count = 0;
     unsigned int id;
+    unsigned int last;
 
-    id = vebsucc (idset->T, 0);
-    while (id != idset->T.M) {
-        int next = vebsucc (idset->T, id + 1);
-        char *sep = next == idset->T.M ? "" : ",";
+    last = idset_last (idset);
+    id = idset_first (idset);
+    while (id != IDSET_INVALID_ID) {
+        char *sep = id == last ? "" : ",";
         if (catprintf (s, sz, len, "%d%s", id, sep) < 0)
             return -1;
         if (count < INT_MAX)
             count++;
-        id = next;
+        id = idset_next (idset, id);
     }
     return count;
 }

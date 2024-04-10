@@ -178,6 +178,7 @@ test_cronodate_t_CPPFLAGS = $(test_cppflags)
 test_cronodate_t_LDADD = \
 	$(builddir)/cronodate.lo \
 	$(top_builddir)/src/common/libidset/libidset.la \
+	$(top_builddir)/src/common/croaring/libcroaring.la \
 	$(top_builddir)/src/common/libtap/libtap.la
 
 test_wallclock_t_SOURCES = test/wallclock.c

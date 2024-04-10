@@ -16,13 +16,13 @@
  * All ops are O(log m), for key bitsize m: 2^m == T.M.
  */
 
-#include "veb.h"
 #include "idset.h"
+#include "roaring/roaring.h"
 
 struct idset {
-    size_t count;
-    Veb T;
+    size_t size;
     int flags;
+    roaring_bitmap_t *b;
 };
 
 #define IDSET_ENCODE_CHUNK 1024

@@ -113,7 +113,7 @@ void test_codec (void)
         idset = idset_decode (ip->in);
         if (ip->out == NULL) { // expected fail
             ok (idset == NULL && errno == EINVAL,
-                "idset_encode flags=0x%x '%s' fails with EINVAL",
+                "idset_decode flags=0x%x '%s' fails with EINVAL",
                     ip->flags, ip->in);
         }
         else {

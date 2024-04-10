@@ -45,19 +45,16 @@ struct idset *idset_create (size_t size, int flags)
     if (!(idset = malloc (sizeof (*idset))))
         return NULL;
     if ((flags & IDSET_FLAG_INITFULL))
-        idset->T = vebnew (size, 1);
+        idset->b = roaring_bitmap_from_range (0, size, 1);
     else
-        idset->T = vebnew (size, 0);
-    if (!idset->T.D) {
+        idset->b = roaring_bitmap_create ();
+    if (!idset->b) {
         free (idset);
         errno = ENOMEM;
         return NULL;
     }
     idset->flags = flags;
-    if ((flags & IDSET_FLAG_INITFULL))
-        idset->count = size;
-    else
-        idset->count = 0;
+    idset->size = size;
     return idset;
 }
 
@@ -65,7 +62,7 @@ void idset_destroy (struct idset *idset)
 {
     if (idset) {
         int saved_errno = errno;
-        free (idset->T.D);
+        roaring_bitmap_free (idset->b);
         free (idset);
         errno = saved_errno;
     }
@@ -73,19 +70,7 @@ void idset_destroy (struct idset *idset)
 
 size_t idset_universe_size (const struct idset *idset)
 {
-    return idset ? idset->T.M : 0;
-}
-
-static Veb vebdup (Veb T)
-{
-    size_t size = vebsize (T.M);
-    Veb cpy;
-
-    cpy.k = T.k;
-    cpy.M = T.M;
-    if ((cpy.D = malloc (size)))
-        memcpy (cpy.D, T.D, size);
-    return cpy;
+    return idset ? idset->size : 0;
 }
 
 static struct idset *idset_copy_flags (const struct idset *idset, int flags)
@@ -95,12 +80,12 @@ static struct idset *idset_copy_flags (const struct idset *idset, int flags)
     if (!(cpy = malloc (sizeof (*idset))))
         return NULL;
     cpy->flags = flags;
-    cpy->T = vebdup (idset->T);
-    if (!cpy->T.D) {
+    cpy->b = roaring_bitmap_copy (idset->b);
+    if (!cpy->b) {
         idset_destroy (cpy);
         return NULL;
     }
-    cpy->count = idset->count;
+    cpy->size = idset->size;
     return cpy;
 }
 
@@ -120,98 +105,23 @@ static bool valid_id (unsigned int id)
     return true;
 }
 
-/* Double the idset universe size until it is at least 'size'.
- * Return 0 on success, -1 on failure with errno == ENOMEM.
- */
 static int idset_grow (struct idset *idset, size_t size)
 {
-    size_t newsize = idset->T.M;
-    Veb T;
-    unsigned int id;
+    size_t newsize = idset->size;
 
     while (newsize < size)
         newsize <<= 1;
 
-    if (newsize > idset->T.M) {
+    if (newsize > idset->size) {
         if (!(idset->flags & IDSET_FLAG_AUTOGROW)) {
             errno = EINVAL;
             return -1;
         }
-        T = vebnew (newsize, 0);
-        if (!T.D)
-            return -1;
-
-        id = vebsucc (idset->T, 0);
-        while (id < idset->T.M) {
-            vebput (T, id);
-            id = vebsucc (idset->T, id + 1);
-        }
-        if ((idset->flags & IDSET_FLAG_INITFULL)) {
-            for (id = idset->T.M; id < newsize; id++)
-                vebput (T, id);
-            idset->count += (newsize - idset->T.M);
-        }
-        free (idset->T.D);
-        idset->T = T;
+        if ((idset->flags & IDSET_FLAG_INITFULL))
+            roaring_bitmap_add_range (idset->b, idset->size, newsize);
+        idset->size = newsize;
     }
     return 0;
-}
-
-/* Helper to avoid costly idset_test() operation in idset_put()/idset_del()
- * in some cases that may commonly arise in idset_encode(), for example.
- * This function runs in constant time.  Return true if id is definitely not
- * in set.  A false result is indeterminate.
- */
-static bool nonmember_fast (struct idset *idset, unsigned int id)
-{
-    unsigned int last = idset_last (idset);
-    if (last == IDSET_INVALID_ID || id > last)
-        return true;
-    unsigned int first = idset_first (idset);
-    if (first == IDSET_INVALID_ID || id < first)
-        return true;
-    return false;
-}
-
-/* Wrapper for vebput() which increments idset count.
- * The operation is skipped if id is already in the set.
- */
-static void idset_put (struct idset *idset, unsigned int id)
-{
-    if ((idset->flags & IDSET_FLAG_COUNT_LAZY)
-        || nonmember_fast (idset, id)
-        || !idset_test (idset, id)) {
-        idset->count++;
-        vebput (idset->T, id);
-    }
-}
-
-/* Call this variant if id is known to NOT be in the set
- */
-static void idset_put_nocheck (struct idset *idset, unsigned int id)
-{
-    idset->count++;
-    vebput (idset->T, id);
-}
-
-/* Wrapper for vebdel() which decrements idset count.
- * The operation is skipped if id is not in the set.
- */
-static void idset_del (struct idset *idset, unsigned int id)
-{
-    if ((idset->flags & IDSET_FLAG_COUNT_LAZY)
-        || (!nonmember_fast (idset, id) && idset_test (idset, id))) {
-        idset->count--;
-        vebdel (idset->T, id);
-    }
-}
-
-/* Call this variant if id is known to be IN the set
- */
-static void idset_del_nocheck (struct idset *idset, unsigned int id)
-{
-    idset->count--;
-    vebdel (idset->T, id);
 }
 
 int idset_set (struct idset *idset, unsigned int id)
@@ -229,10 +139,8 @@ int idset_set (struct idset *idset, unsigned int id)
             return 0;
         if (idset_grow (idset, id + 1) < 0)
             return -1;
-        idset_put_nocheck (idset, id);
     }
-    else
-        idset_put (idset, id);
+    roaring_bitmap_add (idset->b, id);
     return 0;
 }
 
@@ -247,29 +155,20 @@ static void normalize_range (unsigned int *lo, unsigned int *hi)
 
 int idset_range_set (struct idset *idset, unsigned int lo, unsigned int hi)
 {
-    unsigned int id;
-
     if (!idset || !valid_id (lo) || !valid_id (hi)) {
         errno = EINVAL;
         return -1;
     }
     normalize_range (&lo, &hi);
 
-    // see IDSET_FLAG_INITFULL note in idset_set()
-    size_t oldsize = idset_universe_size (idset);
     if (!(idset->flags & IDSET_FLAG_INITFULL)) {
         if (idset_grow (idset, hi + 1) < 0)
             return -1;
     }
-    for (id = lo; id <= hi; id++) {
-        if (id >= oldsize) {
-            if ((idset->flags & IDSET_FLAG_INITFULL))
-                return 0;
-            idset_put_nocheck (idset, id);
-        }
-        else
-            idset_put (idset, id);
-    }
+    else if (hi >= idset_universe_size (idset))
+        hi = idset_universe_size (idset) - 1;
+
+    roaring_bitmap_add_range_closed (idset->b, lo, hi);
     return 0;
 }
 
@@ -288,56 +187,37 @@ int idset_clear (struct idset *idset, unsigned int id)
             return 0;
         if (idset_grow (idset, id + 1) < 0)
             return -1;
-        idset_del_nocheck (idset, id);
     }
-    else
-        idset_del (idset, id);
+    roaring_bitmap_remove (idset->b, id);
     return 0;
 }
 
 int idset_range_clear (struct idset *idset, unsigned int lo, unsigned int hi)
 {
-    unsigned int id;
-
     if (!idset || !valid_id (lo) || !valid_id (hi)) {
         errno = EINVAL;
         return -1;
     }
     normalize_range (&lo, &hi);
-    // see IDSET_FLAG_INITFULL note in idset_clear()
-    size_t oldsize = idset_universe_size (idset);
-    if ((idset->flags & IDSET_FLAG_INITFULL)) {
-        if (idset_grow (idset, hi + 1) < 0)
-            return -1;
-    }
-    for (id = lo; id <= hi; id++) {
-        if (id >= oldsize) {
-            if (!(idset->flags & IDSET_FLAG_INITFULL))
-                return 0;
-            idset_del_nocheck (idset, id);
-        }
-        else
-            idset_del (idset, id);
-    }
+    if (hi >= idset_universe_size (idset)
+        && !(idset->flags & IDSET_FLAG_INITFULL))
+        hi = idset_universe_size (idset) - 1;
+    roaring_bitmap_remove_range_closed (idset->b, lo, hi);
     return 0;
 }
 
 bool idset_test (const struct idset *idset, unsigned int id)
 {
-    if (!idset || !valid_id (id) || id >= idset->T.M)
+    if (!idset || !valid_id (id))
         return false;
-    return (vebsucc (idset->T, id) == id);
+    return roaring_bitmap_contains (idset->b, id);
 }
 
 unsigned int idset_first (const struct idset *idset)
 {
     unsigned int next = IDSET_INVALID_ID;
-
-    if (idset) {
-        next = vebsucc (idset->T, 0);
-        if (next == idset->T.M)
-            next = IDSET_INVALID_ID;
-    }
+    if (idset && !roaring_bitmap_is_empty (idset->b))
+        next = roaring_bitmap_minimum (idset->b);
     return next;
 }
 
@@ -347,9 +227,11 @@ unsigned int idset_next (const struct idset *idset, unsigned int id)
     unsigned int next = IDSET_INVALID_ID;
 
     if (idset) {
-        next = vebsucc (idset->T, id + 1);
-        if (next == idset->T.M)
-            next = IDSET_INVALID_ID;
+        roaring_uint32_iterator_t i;
+        roaring_iterator_init (idset->b, &i);
+        roaring_uint32_iterator_move_equalorlarger (&i, id+1);
+        if (i.has_value)
+            next = i.current_value;
     }
     return next;
 }
@@ -358,11 +240,8 @@ unsigned int idset_last (const struct idset *idset)
 {
     unsigned int last = IDSET_INVALID_ID;
 
-    if (idset) {
-        last = vebpred (idset->T, idset->T.M - 1);
-        if (last == idset->T.M)
-            last = IDSET_INVALID_ID;
-    }
+    if (idset && !roaring_bitmap_is_empty (idset->b))
+        last = roaring_bitmap_maximum (idset->b);
     return last;
 }
 
@@ -370,10 +249,16 @@ unsigned int idset_prev (const struct idset *idset, unsigned int id)
 {
     unsigned int next = IDSET_INVALID_ID;
 
+    if (id == IDSET_INVALID_ID)
+        return next;
+
     if (idset) {
-        next = vebpred (idset->T, id - 1);
-        if (next == idset->T.M)
-            next = IDSET_INVALID_ID;
+        roaring_uint32_iterator_t i;
+        roaring_iterator_init (idset->b, &i);
+        roaring_uint32_iterator_move_equalorlarger (&i, id);
+        roaring_uint32_iterator_previous (&i);
+        if (i.has_value)
+            next = i.current_value;
     }
     return next;
 }
@@ -382,26 +267,12 @@ size_t idset_count (const struct idset *idset)
 {
     if (!idset)
         return 0;
-    if (!(idset->flags & IDSET_FLAG_COUNT_LAZY))
-        return idset->count;
-
-    /* IDSET_FLAG_COUNT_LAZY was set, causing set/clear operations to ignore
-     * safeguards that kept idset->count accurate.  Pay now by iterating.
-     */
-    unsigned int id;
-    size_t count = 0;
-
-    id = idset_first (idset);
-    while (id != IDSET_INVALID_ID) {
-        count++;
-        id = idset_next (idset, id);
-    }
-    return count;
+    return (size_t) roaring_bitmap_get_cardinality (idset->b);
 }
 
 bool idset_empty (const struct idset *idset)
 {
-    if (!idset || vebsucc (idset->T, 0) == idset->T.M)
+    if (!idset || roaring_bitmap_is_empty (idset->b))
         return true;
     return false;
 }
@@ -409,56 +280,15 @@ bool idset_empty (const struct idset *idset)
 bool idset_equal (const struct idset *idset1,
                   const struct idset *idset2)
 {
-    unsigned int id;
-    bool count_checked = false;
-
     if (!idset1 || !idset2)
         return false;
-
-    /* As an optimization, declare the sets unequal if counts differ.
-     * If lazy counts are used, this is potentially slow, so skip.
-     */
-    if (!(idset1->flags & IDSET_FLAG_COUNT_LAZY)
-        && !(idset2->flags & IDSET_FLAG_COUNT_LAZY)) {
-        if (idset_count (idset1) != idset_count (idset2))
-            return false;
-        count_checked = true;
-    }
-
-    id = vebsucc (idset1->T, 0);
-    while (id < idset1->T.M) {
-        if (vebsucc (idset2->T, id) != id)
-            return false; // id in idset1 not set in idset2
-        id = vebsucc (idset1->T, id + 1);
-    }
-
-    /* No need to iterate idset2 if counts were equal and all ids in idset1
-     * were found in idset2.
-     */
-    if (count_checked)
-        return true;
-
-    id = vebsucc (idset2->T, 0);
-    while (id < idset2->T.M) {
-        if (vebsucc (idset1->T, id) != id)
-            return false; // id in idset2 not set in idset1
-        id = vebsucc (idset2->T, id + 1);
-    }
-    return true;
+    return roaring_bitmap_equals (idset1->b, idset2->b);
 }
 
 bool idset_has_intersection (const struct idset *a, const struct idset *b)
 {
-    if (a && b) {
-        unsigned int id;
-
-        id = idset_first (b);
-        while (id != IDSET_INVALID_ID) {
-            if (idset_test (a, id))
-                return true;
-            id = idset_next (b, id);
-        }
-    }
+    if (a && b)
+        return roaring_bitmap_intersect (a->b, b->b);
     return false;
 }
 
@@ -468,15 +298,11 @@ int idset_add (struct idset *a, const struct idset *b)
         errno = EINVAL;
         return -1;
     }
-    if (b) {
-        unsigned int id;
-        id = idset_first (b);
-        while (id != IDSET_INVALID_ID) {
-            if (idset_set (a, id) < 0)
-                return -1;
-            id = idset_next (b, id);
-        }
-    }
+    unsigned int last = idset_last (b);
+    if (last >= idset_universe_size (a))
+        idset_grow (a, last + 1);
+    if (b)
+        roaring_bitmap_or_inplace (a->b, b->b);
     return 0;
 }
 
@@ -503,16 +329,10 @@ int idset_subtract (struct idset *a, const struct idset *b)
         errno = EINVAL;
         return -1;
     }
-    if (b) {
-        unsigned int id;
-
-        id = idset_first (b);
-        while (id != IDSET_INVALID_ID) {
-            if (idset_clear (a, id) < 0)
-                return -1;
-            id = idset_next (b, id);
-        }
-    }
+    if (a == b)
+        roaring_bitmap_clear (a->b);
+    else if (b)
+        roaring_bitmap_andnot_inplace (a->b, b->b);
     return 0;
 }
 
@@ -536,7 +356,6 @@ struct idset *idset_difference (const struct idset *a, const struct idset *b)
 struct idset *idset_intersect (const struct idset *a, const struct idset *b)
 {
     struct idset *result;
-    unsigned int id;
 
     if (!a || !b) {
         errno = EINVAL;
@@ -544,14 +363,7 @@ struct idset *idset_intersect (const struct idset *a, const struct idset *b)
     }
     if (!(result = idset_copy (a)))
         return NULL;
-    id = idset_first (a);
-    while (id != IDSET_INVALID_ID) {
-        if (!idset_test (b, id) && idset_clear (result, id) < 0) {
-            idset_destroy (result);
-            return NULL;
-        }
-        id = idset_next (a, id);
-    }
+    roaring_bitmap_and_inplace (result->b, b->b);
     return result;
 }
 
@@ -573,8 +385,7 @@ int idset_alloc (struct idset *idset, unsigned int *val)
         if (idset_grow (idset, id + 1) < 0)
             return -1;
     }
-    // code above ensures that id is a member of idset
-    idset_del_nocheck (idset, id);
+    idset_clear (idset, id);
     *val = id;
     return 0;
 }
@@ -586,7 +397,7 @@ void idset_free (struct idset *idset, unsigned int val)
 {
     if (!idset || !(idset->flags & IDSET_FLAG_INITFULL))
         return;
-    idset_put (idset, val);
+    idset_set (idset, val);
 }
 
 /* Same as above but fail if the id is already in the set.
@@ -605,7 +416,7 @@ int idset_free_check (struct idset *idset, unsigned int val)
         return -1;
     }
     // code above ensures that id is NOT a member of idset
-    idset_put_nocheck (idset, val);
+    idset_set (idset, val);
     return 0;
 }
 

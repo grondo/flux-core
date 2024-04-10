@@ -9,7 +9,9 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir) \
 	-I$(top_srcdir)/src/include \
 	-I$(top_srcdir)/src/common/libccan \
-	-I$(top_builddir)/src/common/libflux
+	-I$(top_builddir)/src/common/libflux \
+	-I$(top_srcdir)/src/common/croaring
+
 
 noinst_LTLIBRARIES = libidset.la
 fluxinclude_HEADERS = idset.h
@@ -45,6 +47,7 @@ test_idset_t_SOURCES = test/idset.c
 test_idset_t_CPPFLAGS = $(AM_CPPFLAGS)
 test_idset_t_LDADD = \
 	$(top_builddir)/src/common/libidset/libidset.la \
+	$(top_builddir)/src/common/croaring/libcroaring.la \
 	$(top_builddir)/src/common/libutil/libutil.la \
 	$(top_builddir)/src/common/libtap/libtap.la
 
@@ -52,4 +55,5 @@ test_idsetutil_SOURCES = test/idsetutil.c
 test_idsetutil_CPPFLAGS = $(AM_CPPFLAGS)
 test_idsetutil_LDADD = \
 	$(top_builddir)/src/common/libidset/libidset.la \
+	$(top_builddir)/src/common/croaring/libcroaring.la \
 	$(top_builddir)/src/common/libutil/libutil.la
