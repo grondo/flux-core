@@ -298,7 +298,8 @@ error:
  * one from the scheduler itself (for performance reasons).
  */
 static json_t *prepare_sched_status_payload (struct status *status,
-                                             json_t *allocated)
+                                             json_t *allocated,
+                                             flux_error_t *errp)
 {
     struct resource_ctx *ctx = status->ctx;
     const struct idset *exclude = exclude_get (ctx->exclude);
@@ -309,18 +310,32 @@ static json_t *prepare_sched_status_payload (struct status *status,
     struct rlist *rl = NULL;
     json_t *result = NULL;
 
-    if (!(R = inventory_get (ctx->inventory))
-        || !(rl = create_rlist (R, exclude, down, drain))
-        || !(result = json_object ()))
+    if (!(R = inventory_get (ctx->inventory))) {
+        errprintf (errp, "resource inventory currently unavailable");
         goto error;
+    }
+
+    if (!(rl = create_rlist (R, exclude, down, drain))
+        || !(result = json_object ())) {
+        errprintf (errp,
+                   "error preparing status payload: %s",
+                   strerror (errno));
+        goto error;
+    }
 
     if (!(o = get_all (rl))
         || json_object_set_new (result, "all", o) < 0) {
+        errprintf (errp,
+                   "failed to get 'all' resource set: %s",
+                   strerror (errno));
         json_decref (o);
         goto error;
     }
     if (!(o = get_down (rl))
         || json_object_set_new (result, "down", o) < 0) {
+        errprintf (errp,
+                   "failed to get 'down' resource set: %s",
+                   strerror (errno));
         json_decref (o);
         goto error;
     }
@@ -329,6 +344,9 @@ static json_t *prepare_sched_status_payload (struct status *status,
     else
         o = get_empty_set ();
     if (!o || json_object_set_new (result, "allocated", o) < 0) {
+        errprintf (errp,
+                   "failed to prepare 'allocated' resource set: %s",
+                   strerror (errno));
         json_decref (o);
         goto error;
     }
@@ -380,10 +398,8 @@ static void sched_status_continuation (flux_future_t *f, void *arg)
                    future_strerror (f, errno));
         goto error;
     }
-    if (!(o = prepare_sched_status_payload (status, allocated))) {
-        errprintf (&error, "error preparing response: %s", strerror (errno));
+    if (!(o = prepare_sched_status_payload (status, allocated, &error)))
         goto error;
-    }
     if (flux_respond_pack (h, msg, "O", o) < 0)
         flux_log_error (h, "error responding to resource.sched-status");
     json_decref (o);
