@@ -13,12 +13,13 @@
  * Each shell sends a message to shell-0 when its first task exits.
  * Shell-0 posts an event to the exec eventlog for the first one received.
  *
- * Shell-0 sets a timer and posts a fatal exception when the timer fires.
+ * Shell-0 sets a timer when enabled and posts a fatal exception when the
+ * timer fires.
  *
  * Shell options to modify the default behavior:
  *
  * exit-timeout
- *   Change the timeout value (FSD), or disable the timer with value "none".
+ *   Set timeout value (FSD), or disable the timer with value "none" (default).
  *
  * exit-on-error
  *   Raise the fatal exception immediately if the first task fails,
@@ -42,7 +43,7 @@
 
 #define TIMEOUT_NONE (-1.)
 
-static const double default_timeout = 30.;
+static const double default_timeout = TIMEOUT_NONE;
 
 struct shell_doom {
     flux_shell_t *shell;
