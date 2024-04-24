@@ -42,6 +42,16 @@ test_expect_success 'flux-shell: run script with 2 nodes and exit-on-error' '
 	test_must_fail run_timeout 30 flux run \
 		-n2 -N2 -o exit-on-error ./testscript.sh
 '
+test_expect_success 'flux-shell: exit-timeout can be set in shell initrc' '
+	cat >initrc.lua <<-EOF &&
+	if shell.options["exit-timeout"] == nil then
+	    shell.options["exit-timeout"] = "1s"
+	end
+	EOF
+	test_must_fail run_timeout 30 flux run \
+		-o initrc=initrc.lua \
+		-n2 -N2 ./testscript.sh
+'
 test_expect_success 'flux-shell: exit-timeout catches lost shell' '
 	cat >test2.sh <<-"EOF" &&
 	#!/bin/bash
