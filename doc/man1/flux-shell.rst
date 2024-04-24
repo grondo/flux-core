@@ -341,12 +341,11 @@ plugins include:
   or ``file``. Users should not need to set this option directly as it
   will be handled by options of higher level commands like :man1:`flux-submit`.
 
-.. option:: exit-timeout=VALUE
+.. option:: exit-timeout=DURATION
 
-  A fatal exception is raised on the job 30s after the first task exits.
-  The timeout period may be altered by providing a different value in
-  Flux Standard Duration form.  A value of ``none`` disables generation of
-  the exception.
+  Specify a *DURATION* (in Flux Standard Duration form) to wait after the
+  first task exits before raising a fatal exception. The default is ``none``,
+  which disables generation of the exception.
 
 .. option:: exit-on-error
 

@@ -31,7 +31,7 @@
 
    * - :option:`exit-timeout`
      - Start fatal job exception timer after first task exits
-       (:option:`none|FSD`)
+       (:option:`none|FSD`) (default: :option:`none`)
 
    * - :option:`exit-on-error`
      - Raise a fatal job exception immediately if first task exits with
