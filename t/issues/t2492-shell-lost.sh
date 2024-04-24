@@ -53,7 +53,6 @@ for rank in 3 1; do
 
     id=$(flux submit -N4 --tasks-per-node=1 \
          --input=/dev/null \
-         -o exit-timeout=none \
          --add-file=critical.py="${CRITICAL_RANKS}" \
          flux python {{tmpdir}}/critical.py $rank)
 
