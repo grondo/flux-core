@@ -45,7 +45,7 @@ log "Current overlay status of $jobid:\n"
 flux proxy $jobid flux overlay status
 
 log "Launch a sleep job within $jobid:\n"
-flux proxy $jobid flux submit -N4 sleep inf
+flux proxy $jobid flux submit -N4 -o exit-on-error sleep inf
 
 flux pstree -x --skip-root=no
 
