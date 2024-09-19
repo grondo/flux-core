@@ -91,7 +91,9 @@ nobase_fluxpy_PYTHON = \
 	utils/tomli/__init__.py \
 	utils/tomli/py.typed \
 	utils/tomli/LICENSE \
-	utils/tomli/_types.py
+	utils/tomli/_types.py \
+	utils/graphlib/__init__.py \
+	utils/graphlib/graphlib.py
 
 if HAVE_FLUX_SECURITY
 nobase_fluxpy_PYTHON += security.py
