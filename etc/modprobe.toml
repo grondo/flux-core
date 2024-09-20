@@ -1,0 +1,322 @@
+# modproble.toml - Flux module and rc task configuration
+#
+# Supported keys:
+#
+# modules: Array of modules config entries, supporting the following keys:
+#
+#   name     (required) The module name. This will be the target of module load
+#            and remove requests. If there is a name collision between entries,
+#            then the last one loaded will be used.
+#
+#   args     (optional) An array of module arguments.
+#
+#   ranks    (optional) The set of ranks on this module should be loaded.
+#            May either be an RFC 22 idset string, or a string beginning with
+#            `>` or `<` follwed by a single integer. (e.g. ">0" to load a
+#            module on all ranks but rank 0.
+#
+#   depends  (optional) An array of modules (or tasks) on which this module
+#            depends.
+#
+#   provides (optional) An array of service names this module provides. If
+#            multiple modules provide the same service, then the last one
+#            loaded will be used.
+#
+#   requires-config (optional) An array of configuration keys in dotted key
+#                   form which are required for this module to be loaded.
+#                   If the key is not set, then the module is skipped.
+#
+#   requires-attrs  (optional) Same as with requires-config, but for broker
+#                   attributes.
+# 
+#   
+# rc1.tasks: Array of task entries for rc1. Task entries support the same
+#  set of keys as module entires, with the follwoing additions/amendments:
+#
+#  code    (optional) A string containing Python code to execute. The code
+#          is run in a thread of the modprobe command, and has access to a
+#          Flux handle via `self.handle`, and any `requires-config` and
+#          `requires-attrs` keys are cached in local `conf` and `attrs`
+#          dictionaries.
+#
+#  command (optional) A string representing a set of shell commands to execute
+#          under bash -c.
+#
+#  Note: One of `command` or `code` must be specified.
+#
+#  Note: Task names should not conflict with module names
+#  
+# rc3.tasks: Array of task entires for rc3. These task entries support the
+#  same set of keys as rc1.tasks, with the following additions and amendments
+#
+#
+#  depends (optional) For rc3 tasks, `depends` indicates that the task has
+#           a depencey on the module still being loaded. Therefore, the sense
+#           of depends is reversed in rc3. This is because the dependency is
+#           graph is reversed in rc3.
+#
+#  after   (optional) A set of module/task names which must be predecessors
+#          of this task when executing rc3. This is required because of the
+#          reverse sense of depends for rc3 tasks.
+# 
+
+
+[[modules]]
+name = "content"
+depends = ["config-reload"]
+
+[[modules]]
+name = "barrier"
+depends = ["config-reload"]
+
+[[modules]]
+name = "heartbeat"
+ranks = "0"
+depends = ["config-reload"]
+
+[[modules]]
+name = "cron"
+ranks = "0"
+args = ["sync=heartbeat.pulse"]
+depends = ["config-reload"]
+
+[[modules]]
+name = "kvs"
+depends = ["content", "content-restore"]
+
+[[modules]]
+name = "kvs-watch"
+depends = ["kvs"]
+
+[[modules]]
+name = "sdbus"
+requires-config = ["systemd.enable"]
+depends = ["config-reload"]
+
+[[modules]]
+name = "sdexec"
+depends = ["sdbus"]
+requires-config = ["systemd.enable"]
+
+[[modules]]
+name = "resource"
+depends = ["kvs-watch"]
+
+[[modules]]
+name = "job-manager"
+depends = ["kvs", "resource"]
+ranks = "0"
+
+[[modules]]
+name = "job-info"
+depends = ["kvs", "kvs-watch"]
+
+[[modules]]
+name = "job-list"
+ranks = "0"
+depends = ["job-manager", "kvs"]
+
+[[modules]]
+name = "job-ingest"
+depends = ["job-manager", "config-reload"]
+ranks = "0"
+
+[[modules]]
+name = "job-exec"
+depends = ["kvs", "job-manager"]
+ranks = "0"
+
+[[modules]]
+name = "job-archive"
+depends = ["job-manager"]
+requires-config = ["statedir", "archive.period"]
+ranks = "0"
+
+[[modules]]
+name = "sched-simple"
+provides = ["sched", "feasibility"]
+depends = ["job-manager"]
+ranks = "0"
+
+#  rc1.tasks is an array of tables describing all tasks for runlevel 1
+#
+[[rc1.tasks]]
+name = "config-reload"
+ranks = ">0"
+command = "flux config reload"
+
+[[rc1.tasks]]
+name = "content-restore"
+ranks = "0"
+depends = ["content-backing", "content"]
+requires-attrs = ["content.restore"]
+code = """
+dumpfile = attrs["content.restore"]
+if dumpfile == "auto":
+    dumpfile = Path(f"{statedir}/dump/RESTORE")
+else:
+    dumpfile = Path(dumpfile)
+print(f"restoring from {dumpfile}")
+if dumpfile.exists():
+    Popen(
+        [
+            "flux",
+            "restore",
+            "--quiet",
+            "--checkpoint",
+            "--size-limit=100M",
+            dumpfile,
+        ]
+    ).wait()
+"""
+
+[[rc1.tasks]]
+name = "content-backing"
+depends = ["content"]
+ranks = "0"
+uses-attrs = ["content.backing-module", "content.restore", "statedir"]
+code = """
+import flux
+from pathlib import Path
+
+backing_module = attrs.get("content.backing-module", "content-sqlite")
+dumpfile = attrs.get("content.restore")
+statedir = attrs.get("statedir", ".")
+
+if dumpfile == "auto":
+    dumpfile = Path(f"{statedir}/dump/RESTORE")
+    if not dumpfile.exists():
+        dumpfile = None
+
+h = flux.Flux()
+if dumpfile is not None:
+    print(f"loading {backing_module} with truncate")
+    h.rpc("module.load", {"path": backing_module, "args": ["truncate"]}).get()
+elif backing_module != "none":
+    print(f"loading {backing_module} with no args")
+    h.rpc("module.load", {"path": backing_module, "args": []}).get()
+"""
+
+[[rc1.tasks]]
+name = "post-start-event"
+ranks = "0"
+depends = ["kvs"]
+command = "flux startlog --post-start-event"
+
+[[rc1.tasks]]
+name = "check-clean-shutdown"
+depends = ["kvs-watch"]
+ranks = "0"
+command = """
+    if ! flux startlog --check --quiet; then
+        echo "Flux was not shut down properly.  Data may have been lost."
+    fi
+"""
+
+[[rc1.tasks]]
+name = "cron-load"
+ranks = "0"
+depends = ["cron"]
+requires-attrs = ["cron.directory"]
+code = """
+from pathlib import Path
+from subprocess import Popen
+
+print(attrs)
+
+dir = Path(attrs["cron.directory"])
+for file in dir.iterdir():
+    if file.is_file():
+        Popen(["flux", "cron", "tab", str(file)]).wait()
+"""
+
+[[rc1.tasks]]
+name = "push-cleanup"
+ranks = "0"
+command = """
+if test -z "${FLUX_DISABLE_JOB_CLEANUP}"; then
+	flux admin cleanup-push <<-EOT
+	flux queue stop --quiet --all --nocheckpoint
+	flux resource acquire-mute
+	flux cancel --user=all --quiet --states RUN
+	flux queue idle --quiet
+	EOT
+fi
+"""
+
+
+#  rc3 tasks is an array of tasks to run at runlevel=3
+#
+[[rc3.tasks]]
+name = "post-finish-event"
+ranks = "0"
+command = "flux startlog --post-finish-event"
+depends = ["kvs"]
+after = ["resource"]
+
+[[rc3.tasks]]
+name = "content-flush"
+depends =  ["content-dump", "content"]
+uses-attrs = ["content.backing-module"]
+after = ["kvs"]
+code = """
+handle = flux.Flux()
+if attrs.get("content.backing-module") != "none":
+    handle.rpc("content.flush").get()
+"""
+
+[[rc3.tasks]]
+name = "remove-backing-module"
+depends = ["content"]
+after = ["content-dump", "content-flush"]
+ranks = "0"
+uses-attrs = ["content.backing-module"]
+code = """
+h = flux.Flux()
+backing_module = attrs.get("content.backing-module", "content-sqlite")
+if backing_module != "none":
+    h.rpc("module.remove", {"name": backing_module}).get()
+"""
+
+[[rc3.tasks]]
+name = "content-dump"
+depends = ["remove-backing-module"]
+after = ["content-flush"]
+ranks = "0"
+requires-attrs = ["content.dump"]
+uses-attrs = ["statedir"]
+code = """
+from pathlib import Path
+from datetime import datetime
+
+dumpfile = attrs.get("content.dump")
+dumplink = None
+if dumpfile:
+    if dumpfile == "auto":
+        path = Path(attrs.get("statedir", ".") + "/dump")
+        path.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dumpfile = path / f"{timestamp}.tgz"
+        dumplink = path / "RESTORE"
+
+    print(f"dumping content to {dumpfile} with link {dumplink}", file=sys.stderr)
+    Popen(
+        [
+            "flux",
+            "dump",
+            "--quiet",
+            "--ignore-failed-read",
+            "--checkpoint",
+            dumpfile,
+        ]
+    ).wait()
+
+    if dumplink:
+        Popen(
+            [
+                "sh",
+                "-c",
+                f"ln -s {dumpfile.name} {dumplink}"
+            ]
+        ).wait()
+"""
