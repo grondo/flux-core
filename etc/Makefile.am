@@ -16,9 +16,6 @@ dist_fluxconf_SCRIPTS = \
         rc1 \
         rc3
 
-dist_fluxrc1_SCRIPTS = \
-        rc1.d/02-cron
-
 dist_fluxconf_DATA = \
 	modprobe.toml
 

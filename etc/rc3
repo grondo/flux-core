@@ -1,21 +1,5 @@
 #!/bin/sh
 
-RANK=$(flux getattr rank)
-exit_rc=0
-
-# Usage: modrm {all|<rank>} modname
-modrm() {
-    local where=$1; shift
-    if test "$where" = "all" || test $where -eq $RANK; then
-        flux module remove -f $* || exit_rc=1
-    fi
-}
-
-backing_module() {
-    local backingmod=$(flux getattr content.backing-module 2>/dev/null) || :
-    echo ${backingmod:-content-sqlite}
-}
-
 core_dir=$(cd ${0%/*} && pwd -P)
 all_dirs=$core_dir${FLUX_RC_EXTRA:+":$FLUX_RC_EXTRA"}
 IFS=:
@@ -27,54 +11,6 @@ for rcdir in $all_dirs; do
     done
 done
 
-modrm 0 heartbeat
-modrm 0 sched-simple
-modrm all resource
-modrm 0 job-exec
-modrm 0 job-list
-modrm all job-info
-modrm 0 job-manager
-modrm all job-ingest
+flux modprobe rc3
 
-modrm 0 cron
-modrm all sdexec
-modrm all sdbus
-modrm all barrier
-
-if test $RANK -eq 0; then
-    if test "$(backing_module)" != "none"; then
-        flux startlog --post-finish-event || exit_rc=1
-    fi
-fi
-
-modrm all kvs-watch
-modrm all kvs
-
-if test "$(backing_module)" != "none"; then
-    flux content flush || exit_rc=1
-fi
-
-if test $RANK -eq 0; then
-    backingmod=$(backing_module)
-    dumpfile=$(flux getattr content.dump 2>/dev/null)
-    if test $exit_rc -eq 0 -a -n "${dumpfile}"; then
-        if test "${dumpfile}" = "auto"; then
-            statedir=$(flux getattr statedir 2>/dev/null)
-            mkdir -p "${statedir:-.}/dump"
-            dumpfile="${statedir:-.}/dump/$(date +%Y%m%d_%H%M%S).tgz"
-            dumplink="${statedir:-.}/dump/RESTORE"
-        fi
-        echo "dumping content to ${dumpfile}"
-        if flux dump --quiet --ignore-failed-read --checkpoint ${dumpfile}; then
-            test -n "$dumplink" && ln -s $(basename ${dumpfile}) ${dumplink}
-        else
-            exit_rc=1
-        fi
-    fi
-    if test "${backingmod}" != "none"; then
-        flux module remove ${backingmod} || exit_rc=1
-    fi
-fi
-modrm all content
-
-exit $exit_rc
+exit $?
