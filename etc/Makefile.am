@@ -16,9 +16,6 @@ dist_fluxconf_SCRIPTS = \
         rc1 \
         rc3
 
-dist_fluxrc1_SCRIPTS = \
-        rc1.d/02-cron
-
 fluxhelpdir = $(datadir)/flux/help.d
 fluxhelp_DATA = flux/help.d/core.json
 flux/help.d/core.json: $(top_srcdir)/doc/manpages.py
