@@ -298,8 +298,7 @@ test_expect_success 'perilog: bad log-ignore regexp is caught' '
 
 #  Note: run this job before taking rank 3 offline below
 test_expect_success 'perilog: run job across all 4 ranks' '
-	flux jobs &&
-	flux resource drain -o "{ranks:>4} {reason}" &&
+	undrain_all &&
 	jobid=$(flux submit --wait-event=clean -N4 -n4 true)
 '
 #  Note: rank 3 is taken offline after this point for testing handling
