@@ -207,6 +207,11 @@ jobs:
       env: ${{matrix.env}}
       run: src/test/checks-annotate.sh
 
+    - name: tmate
+      if: failure()
+      env: ${{matrix.env}}
+      uses: mxschmitt/action-tmate@v3
+
     - name: coverage report
       if: success() && matrix.coverage
       env:
