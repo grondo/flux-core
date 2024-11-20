@@ -170,6 +170,14 @@ class ModuleLoadTask(Task):
         super().__init__(details)
 
     def run(self):
+        name = (
+            "FLUX_MODPROBE_MODULE_"
+            + self.name.replace("-", "_").upper()
+            + "_ARGS_APPEND"
+        )
+        if name in os.environ:
+            self.args.extend(os.environ[name].split(","))
+
         self.handle.rpc("module.load", {"path": self.name, "args": self.args}).get()
 
 
