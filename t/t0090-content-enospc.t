@@ -2,6 +2,9 @@
 
 test_description='Test content ENOSPC corner cases'
 
+# Append --logfile option if FLUX_TESTS_LOGFILE is set in environment:
+test -n "$FLUX_TESTS_LOGFILE" && set -- "$@" --logfile --debug
+
 . `dirname $0`/sharness.sh
 
 if ! ls /test/tmpfs-1m; then
@@ -30,6 +33,7 @@ test_expect_success 'flux still operates with content-sqlite running out of spac
 	    -o,-Scontent.backing-module=content-sqlite \
 	    -o,-Sstatedir=/test/tmpfs-1m/statedir \
 	    "./fillstatedir.sh; flux dmesg; flux run echo helloworld" > sql.out 2> sql.err &&
+	test_debug "cat sql.out sql.err" &&
 	grep -q "No space left on device" sql.out &&
 	grep "helloworld" sql.out
 '
@@ -42,6 +46,7 @@ test_expect_success 'flux still operates with content-files running out of space
 	    -o,-Scontent.backing-module=content-files \
 	    -o,-Sstatedir=/test/tmpfs-1m/statedir \
 	    "./fillstatedir.sh; flux dmesg; flux run echo helloworld" > files.out 2> files.err &&
+	test_debug "cat files.out files.err" &&
 	grep -q "No space left on device" files.out &&
 	grep "helloworld" files.out
 '
