@@ -13,11 +13,10 @@ tmpfiles_DATA = flux.conf
 
 
 dist_fluxconf_SCRIPTS = \
-        rc1 \
-        rc3
-
-dist_fluxrc1_SCRIPTS = \
-        rc1.d/02-cron
+	rc1 \
+	rc3 \
+	rc1.py \
+	rc3.py
 
 fluxhelpdir = $(datadir)/flux/help.d
 fluxhelp_DATA = flux/help.d/core.json
