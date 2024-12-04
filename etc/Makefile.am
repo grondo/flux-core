@@ -18,6 +18,9 @@ dist_fluxconf_SCRIPTS = \
 	rc1.py \
 	rc3.py
 
+dist_fluxconf_DATA = \
+	modules.toml
+
 fluxhelpdir = $(datadir)/flux/help.d
 fluxhelp_DATA = flux/help.d/core.json
 flux/help.d/core.json: $(top_srcdir)/doc/manpages.py
