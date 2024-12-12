@@ -498,8 +498,17 @@ class Modprobe:
             etc = Path(path).parent
 
         self.add_modules(path)
-        for file in glob.glob(f"{etc}/modules.d/*.toml"):
-            self.add_modules(file)
+        dirs = ["{etc}/modules.d/*.toml"]
+        dirs.extend(
+            filter(
+                lambda s: not s.isspace(),
+                os.environ.get("FLUX_MODPROBE_PATH", "").split(":"),
+            )
+        )
+        for directory in dirs:
+            if Path(directory).exists():
+                for file in glob.glob(f"{directory}/modules.d/*.toml"):
+                    self.add_modules(file)
 
     def solve_tasks_recursive(self, tasks, visited=None, skipped=None):
         """Recursively find all requirements of 'tasks'"""
