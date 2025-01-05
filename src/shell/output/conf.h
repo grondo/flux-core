@@ -30,8 +30,8 @@ struct output_stream {
 };
 
 struct output_config {
-    struct output_stream stdout;
-    struct output_stream stderr;
+    struct output_stream out;
+    struct output_stream err;
 };
 
 struct output_config *output_config_create (flux_shell_t *shell);

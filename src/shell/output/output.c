@@ -209,8 +209,8 @@ static int output_redirect_stream (struct shell_output *out,
 
 static int shell_output_redirect (struct shell_output *out)
 {
-    if (output_redirect_stream (out, "stdout", &out->conf->stdout) < 0
-        || output_redirect_stream (out, "stderr", &out->conf->stderr) < 0)
+    if (output_redirect_stream (out, "stdout", &out->conf->out) < 0
+        || output_redirect_stream (out, "stderr", &out->conf->err) < 0)
         return -1;
     return 0;
 }

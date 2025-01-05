@@ -99,7 +99,7 @@ static int log_output (flux_plugin_t *p,
 
 void shell_output_log_init (flux_plugin_t *p, struct shell_output *out)
 {
-    if (out->conf->stderr.type == FLUX_OUTPUT_TYPE_FILE) {
+    if (out->conf->err.type == FLUX_OUTPUT_TYPE_FILE) {
         if (flux_plugin_add_handler (p, "shell.log", log_output, out) < 0)
             shell_log_errno ("failed to add shell.log handler");
         flux_shell_log_setlevel (FLUX_SHELL_QUIET, "eventlog");

@@ -52,8 +52,8 @@ struct task_output {
     flux_shell_task_t *task;
     int rank;
     char rank_str[13];
-    struct file_entry *stdout;
-    struct file_entry *stderr;
+    struct file_entry *stdout_fp;
+    struct file_entry *stderr_fp;
     task_output_f stdout_f;
     task_output_f stderr_f;
 };
@@ -67,8 +67,8 @@ void task_output_destroy (struct task_output *to)
 {
     if (to) {
         int saved_errno = errno;
-        file_entry_close (to->stdout);
-        file_entry_close (to->stderr);
+        file_entry_close (to->stdout_fp);
+        file_entry_close (to->stderr_fp);
         free (to);
         errno = saved_errno;
     }
@@ -156,9 +156,9 @@ static int task_output_write_file (struct task_output *to,
                                    int len,
                                    bool eof)
 {
-    struct file_entry *fp = to->stderr;
+    struct file_entry *fp = to->stderr_fp;
     if (streq (stream, "stdout"))
-        fp = to->stdout;
+        fp = to->stdout_fp;
     if (file_entry_write (fp, to->rank_str, data, len) < 0)
         return -1;
     return 0;
@@ -189,16 +189,16 @@ static struct task_output *task_output_create (struct shell_output *out,
         /* rank 0: if stdout/err are files then task writes to file,
          * otherwise KVS.
          */
-        if (out->conf->stdout.type == FLUX_OUTPUT_TYPE_FILE) {
-            if (!(to->stdout = task_open_file (out, task, &out->conf->stdout)))
+        if (out->conf->out.type == FLUX_OUTPUT_TYPE_FILE) {
+            if (!(to->stdout_fp = task_open_file (out, task, &out->conf->out)))
                 goto error;
             to->stdout_f = task_output_write_file;
         }
         else
             to->stdout_f = task_output_write_kvs;
 
-        if (out->conf->stderr.type == FLUX_OUTPUT_TYPE_FILE) {
-            if (!(to->stderr = task_open_file (out, task, &out->conf->stderr)))
+        if (out->conf->err.type == FLUX_OUTPUT_TYPE_FILE) {
+            if (!(to->stderr_fp = task_open_file (out, task, &out->conf->err)))
                 goto error;
             to->stderr_f = task_output_write_file;
         }
@@ -208,16 +208,16 @@ static struct task_output *task_output_create (struct shell_output *out,
     else {
         /* Other shell ranks: client writer unless per-shell output
          */
-        if (out->conf->stdout.per_shell) {
-            if (!(to->stdout = task_open_file (out, task, &out->conf->stdout)))
+        if (out->conf->out.per_shell) {
+            if (!(to->stdout_fp = task_open_file (out, task, &out->conf->out)))
                 goto error;
             to->stdout_f = task_output_write_file;
         }
         else
             to->stdout_f = task_output_write_client;
 
-        if (out->conf->stderr.per_shell) {
-            if (!(to->stderr = task_open_file (out, task, &out->conf->stderr)))
+        if (out->conf->err.per_shell) {
+            if (!(to->stderr_fp = task_open_file (out, task, &out->conf->err)))
                 goto error;
             to->stderr_f = task_output_write_file;
         }
@@ -366,8 +366,8 @@ struct task_output_list *task_output_list_create (struct shell_output *out)
          *  and add task output object to task outputs list
          */
         if (!(to = task_output_create (out, task))
-            || task_output_setup_stream (to, "stdout", &out->conf->stdout) < 0
-            || task_output_setup_stream (to, "stderr", &out->conf->stderr) < 0
+            || task_output_setup_stream (to, "stdout", &out->conf->out) < 0
+            || task_output_setup_stream (to, "stderr", &out->conf->err) < 0
             || !zlistx_add_end (l->task_outputs, to))
             goto error;
         task = flux_shell_task_next (out->shell);
@@ -388,9 +388,9 @@ struct file_entry *task_output_file_entry (struct task_output_list *l,
     to = zlistx_first (l->task_outputs);
     while (to) {
         if (n == index) {
-            struct file_entry *fp = to->stderr;
+            struct file_entry *fp = to->stderr_fp;
             if (streq (stream, "stdout"))
-                fp = to->stdout;
+                fp = to->stdout_fp;
             return filehash_entry_incref (fp);
         }
         to = zlistx_next (l->task_outputs);

@@ -147,17 +147,17 @@ struct output_config *output_config_create (flux_shell_t *shell)
     if (!(conf = calloc (1, sizeof (*conf))))
         return NULL;
 
-    conf->stdout.type = FLUX_OUTPUT_TYPE_KVS;
-    conf->stdout.mode = "truncate";
-    conf->stdout.buffer_type = "line";
-    if (output_stream_getopts (shell, "stdout", &conf->stdout) < 0)
+    conf->out.type = FLUX_OUTPUT_TYPE_KVS;
+    conf->out.mode = "truncate";
+    conf->out.buffer_type = "line";
+    if (output_stream_getopts (shell, "stdout", &conf->out) < 0)
         goto error;
 
     /* stderr defaults except for buffer_type inherit from stdout:
      */
-    conf->stderr = conf->stdout;
-    conf->stderr.buffer_type = "none";
-    if (output_stream_getopts (shell, "stderr", &conf->stderr) < 0)
+    conf->err = conf->out;
+    conf->err.buffer_type = "none";
+    if (output_stream_getopts (shell, "stderr", &conf->err) < 0)
         goto error;
 
     return conf;
