@@ -165,7 +165,8 @@ test_ldadd = \
 	$(top_builddir)/src/common/libtap/libtap.la
 
 test_ldflags = \
-	-no-install
+	-no-install \
+	$(AM_LDFLAGS)
 
 test_cppflags = \
         -I$(top_srcdir)/src/common/libtap \

@@ -46,7 +46,8 @@ test_cppflags = \
 	$(AM_CPPFLAGS)
 
 test_ldflags = \
-	-no-install
+	-no-install \
+	$(AM_LDFLAGS)
 
 check_PROGRAMS = $(TESTS)
 

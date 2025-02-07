@@ -79,7 +79,8 @@ test_cppflags = \
         -I$(top_srcdir)/src/common/libtap
 
 test_ldflags = \
-	-no-install
+	-no-install \
+	$(AM_LDFLAGS)
 
 test_sendfd_t_SOURCES = test/sendfd.c
 test_sendfd_t_CPPFLAGS = $(test_cppflags)

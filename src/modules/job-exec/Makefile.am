@@ -36,7 +36,8 @@ test_ldadd = \
 	$(LIBPTHREAD) $(JANSSON_LIBS)
 
 test_ldflags = \
-	-no-install
+	-no-install \
+	$(AM_LDFLAGS)
 
 test_cppflags = \
 	$(AM_CPPFLAGS)

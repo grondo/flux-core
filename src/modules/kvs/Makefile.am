@@ -54,7 +54,8 @@ test_ldadd = \
         $(LIBPTHREAD)
 
 test_ldflags = \
-	-no-install
+	-no-install \
+	$(AM_LDFLAGS)
 
 test_cppflags = \
         $(AM_CPPFLAGS) \

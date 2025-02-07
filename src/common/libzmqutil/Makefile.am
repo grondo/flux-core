@@ -62,7 +62,8 @@ test_cppflags = \
 	$(AM_CPPFLAGS)
 
 test_ldflags = \
-	-no-install
+	-no-install \
+	$(AM_LDFLAGS)
 
 test_msg_zsock_t_SOURCES = test/msg_zsock.c
 test_msg_zsock_t_CPPFLAGS = $(test_cppflags)
