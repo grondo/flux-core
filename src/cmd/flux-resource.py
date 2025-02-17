@@ -17,7 +17,8 @@ import sys
 from itertools import combinations
 
 import flux
-from flux.eventlog import EventLogFormatter
+import flux.kvs
+from flux.eventlog import EventLogEvent, EventLogFormatter
 from flux.hostlist import Hostlist
 from flux.idset import IDset
 from flux.resource import (
@@ -748,6 +749,89 @@ def eventlog(args):
             break
     consumer.stop()
 
+def hl_intersect(hl1, hl2):
+    for host in hl1:
+        if host in hl2:
+            return True
+    return False
+
+#class ResourceHistoryEvent(EventLogEvent):
+#
+#    def __init__ (self, entry):
+#        super().__init__(entry)
+#        self.ranks = IDset(self.context.get("idset", ""))
+#        self.nodelist = Hostlist(self.context.get("nodelist", ""))
+#        self.reason = self.context.get("reason", "")
+#
+#    def match(self, idset, hosts):
+#        """Return true if this event matches either idset or hosts"""
+#        if idset and idset.intersect(self.ranks):
+#            return True
+#        if hosts and hl_intersect(self.nodelist, hosts):
+#            return True
+#        return False
+
+class ResourceHistoryEvent:
+
+    def __init__ (self, event):
+        self.timestamp = event.timestamp
+        self.name = event.name
+        self.ranks = IDset(event.context.get("idset", ""))
+        self.nodelist = Hostlist(event.context.get("nodelist", ""))
+        self.reason = event.context.get("reason", "")
+
+    def match(self, idset, hosts):
+        """Return true if this event matches either idset or hosts"""
+        if idset and idset.intersect(self.ranks):
+            return True
+        if hosts and hl_intersect(self.nodelist, hosts):
+            return True
+        return False
+
+
+def history(args):
+    """Show resorce eventlog for one or more ranks or nodes"""
+    hosts = None
+    ranks = None
+    try:
+        hosts = Hostlist(args.targets)
+    except ValueError:
+        try:
+            ranks = IDSet(args.targets)
+        except ValueError:
+            raise ValueError(f"invalid targets {args.targets}")
+
+    h = flux.Flux()
+    history = []
+    #for line in flux.kvs.get(h, "resource.eventlog").splitlines():
+    #    entry = ResourceHistoryEvent(json.loads(line))
+    #    if entry.match(ranks, hosts):
+    #        history.append(entry)
+
+    consumer = ResourceJournalConsumer(h, include_sentinel=True).start()
+    while True:
+        event = consumer.poll()
+        if event is None or event.is_empty():
+            break
+        event = ResourceHistoryEvent(event)
+        print(event)
+        if event.match(ranks, hosts):
+            history.append(event)
+
+    headings = {
+        "timestamp": "TIME",
+        "name": "EVENT",
+        "reason": "REASON",
+        "nodelist": "NODELIST"
+    }
+
+    formatter = flux.util.OutputFormat(
+        "{timestamp!d:%b%d %R::<12} {name:<7} +:{reason:<8.8} {nodelist}",
+        headings=headings
+    )
+    formatter.print_items(history)
+
+
 
 LOGGER = logging.getLogger("flux-resource")
 
@@ -1086,6 +1170,18 @@ def main():
     )
     eventlog_parser.set_defaults(func=eventlog)
 
+    history_parser = subparsers.add_parser(
+        "history", formatter_class=flux.util.help_formatter()
+    )
+    history_parser.add_argument(
+        "targets",
+        metavar="NODELIST",
+        type=str,
+        nargs="?",
+        help="Limit output to specified targets"
+    )
+    history_parser.set_defaults(func=history)
+ 
     args = parser.parse_args()
     args.func(args)
 
