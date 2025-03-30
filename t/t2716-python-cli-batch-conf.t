@@ -215,4 +215,18 @@ test_expect_success 'flux-batch --conf end-to-end test' '
 	jq -e ".resource.noverify" <batchtest.out &&
 	jq -e ".resource.exclude == \"0\"" <batchtest.out
 '
+test_expect_success 'signals can be sent to batch script' '
+	cat <<-EOF >trap-usr1.sh &&
+	#!/bin/sh
+	echo ready
+	trap "echo Got SIGUSR1" 10
+	sleep 60
+	EOF
+	chmod +x trap-usr1.sh &&
+	jobid=$(flux batch -n1 --output=usr1.out ./trap-usr1.sh) &&
+	waitfile.lua -t 60 -p ready usr1.out &&
+	flux job kill -s 10 $jobid &&
+	flux job wait-event -vt 60 $jobid clean &&
+	grep SIGUSR1 usr1.out
+'
 test_done
