@@ -151,7 +151,8 @@ TESTS = test_sha1.t \
 	test_basemoji.t \
 	test_sigutil.t \
 	test_parse_size.t \
-	test_cgroup.t
+	test_cgroup.t \
+	test_xpack.t
 
 test_ldadd = \
 	$(top_builddir)/src/common/libutil/libutil.la \
@@ -319,3 +320,7 @@ test_parse_size_t_LDADD = $(test_ldadd)
 test_cgroup_t_SOURCES = test/cgroup.c
 test_cgroup_t_CPPFLAGS = $(test_cppflags)
 test_cgroup_t_LDADD = $(test_ldadd)
+
+test_xpack_t_SOURCES = test/xpack.c
+test_xpack_t_CPPFLAGS = $(test_cppflags)
+test_xpack_t_LDADD = $(test_ldadd)
