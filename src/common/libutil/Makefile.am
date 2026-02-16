@@ -109,7 +109,9 @@ libutil_la_SOURCES = \
 	basename.c \
 	ansi_color.h \
 	cgroup.h \
-	cgroup.c
+	cgroup.c \
+	xpack.h \
+	xpack.c
 
 libutil_la_LDFLAGS = \
         $(AM_LDFLAGS) \
