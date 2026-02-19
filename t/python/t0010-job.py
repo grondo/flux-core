@@ -26,7 +26,7 @@ import flux.constants
 import flux.kvs
 import yaml
 from flux import job
-from flux.job import JobInfo, Jobspec, JobspecV1, ffi
+from flux.job import JobID, JobInfo, Jobspec, JobspecV1, ffi
 from flux.job.stats import JobStats
 
 
@@ -747,6 +747,7 @@ class TestJob(unittest.TestCase):
         job_dict = result[ids[0]].get_info().to_dict()
         self.assertIsInstance(job_dict, dict)
         self.assertEqual(job_dict["id"], ids[0])
+        self.assertEqual(JobID(job_dict["jobid"]), ids[0])
         self.assertEqual(job_dict["result"], "COMPLETED")
         self.assertEqual(job_dict["returncode"], 0)
         self.assertEqual(job_dict["duration"], 0.0)
@@ -769,6 +770,7 @@ class TestJob(unittest.TestCase):
         job_dict = result[ids[1]].get_info().to_dict()
         self.assertIsInstance(job_dict, dict)
         self.assertEqual(job_dict["id"], ids[1])
+        self.assertEqual(JobID(job_dict["jobid"]), ids[0])
         self.assertEqual(job_dict["result"], "FAILED")
         self.assertEqual(job_dict["returncode"], 1)
         self.assertEqual(job_dict["duration"], 0.0)
