@@ -229,7 +229,7 @@ if [[ "$INSTALL_ONLY" == "t" ]]; then
                ./configure --prefix=/usr --sysconfdir=/etc \
                 --with-systemdsystemunitdir=/etc/systemd/system \
                 --localstatedir=/var \
-                --with-flux-security &&
+                --with-flux-security ${CONFIGURE_ARGS} &&
                make clean &&
                make -j${JOBS}"
     RC=$?
