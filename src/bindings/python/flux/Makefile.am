@@ -95,6 +95,7 @@ nobase_fluxpy_PYTHON = \
 	shape/__init__.py \
 	abc/journal.py \
 	abc/__init__.py \
+	testing/job_watcher.py \
 	utils/parsedatetime/__init__.py \
 	utils/parsedatetime/parsedatetime.py \
 	utils/parsedatetime/warns.py \
