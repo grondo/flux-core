@@ -16,13 +16,21 @@
 # instance running real jobs.
 #
 
+import json
 import os
 import sys
 import unittest
+from io import StringIO
 
 import flux
 from flux.job import JobspecV1
 from flux.testing.bulkrun import BulkRun
+from flux.testing.events import (
+    NORMAL,
+    QUIET,
+    VERBOSE,
+    TestEventEmitter,
+)
 from flux.testing.job_watcher import PerJobEventWatcher
 from subflux import rerun_under_flux
 
@@ -69,6 +77,14 @@ def _wait_for_queue_drain(handle, timeout=30):
     future = handle.rpc("job-manager.drain")
     future.wait_for(timeout)
     future.get()
+
+
+def _parse_events(buf):
+    """Parse all events from a captured StringIO emitter stream."""
+    text = buf.getvalue().strip()
+    if not text:
+        return []
+    return [json.loads(line) for line in text.split("\n")]
 
 
 class _BaseTestCase(unittest.TestCase):
@@ -338,6 +354,178 @@ class TestBulkRunCancellation(_BaseTestCase):
 
         self.assertEqual(result.njobs, 5)
         self.assertEqual(len(result.jobids_with("clean")), 5)
+
+
+class TestEvents(_BaseTestCase):
+    """TestEventEmitter (flux.testing.events) emits RFC 18 events.
+
+    Pure-Python tests; the broker is not consulted. They run under
+    the same subflux invocation as the broker-dependent tests, but
+    use a StringIO stream rather than stdout so the captured output
+    is parseable.
+    """
+
+    def test_event_format(self):
+        """Emitted event matches the RFC 18 Flux EventLog format"""
+        buf = StringIO()
+        emitter = TestEventEmitter(verbosity=VERBOSE, stream=buf)
+        emitter.progress(50, 100, unit="jobs", rate=10.5)
+
+        events = _parse_events(buf)
+        self.assertEqual(len(events), 1)
+        ev = events[0]
+        # timestamp present and a numeric type
+        self.assertIn("timestamp", ev)
+        self.assertIsInstance(ev["timestamp"], (int, float))
+        # name and context payload
+        self.assertEqual(ev["name"], "progress")
+        self.assertEqual(ev["context"]["current"], 50)
+        self.assertEqual(ev["context"]["total"], 100)
+        self.assertEqual(ev["context"]["unit"], "jobs")
+        # optional rate field
+        self.assertEqual(ev["context"]["rate"], 10.5)
+
+    def test_quiet_keeps_only_terminal_and_result(self):
+        """QUIET emits start, result, complete; drops stage and below"""
+        buf = StringIO()
+        emitter = TestEventEmitter(verbosity=QUIET, stream=buf)
+        emitter.test_start("t", stages=["s1"])
+        emitter.stage("s1", stage_index=0, total_stages=1)
+        emitter.progress(1, 100, unit="jobs")
+        emitter.warning("ignored at QUIET")
+        emitter.info("also ignored")
+        emitter.result({"x": 1})
+        emitter.test_complete(duration=0.5)
+
+        names = [e["name"] for e in _parse_events(buf)]
+        self.assertEqual(names, ["test.start", "result", "test.complete"])
+
+    def test_normal_drops_progress_keeps_stage(self):
+        """NORMAL keeps stage/warning; drops progress/info/metric"""
+        buf = StringIO()
+        emitter = TestEventEmitter(verbosity=NORMAL, stream=buf)
+        emitter.test_start("test", stages=["s1"])
+        emitter.stage("s1", stage_index=0, total_stages=1)
+        emitter.progress(50, 100, unit="jobs")  # dropped at NORMAL
+        emitter.info("dropped at NORMAL")
+        emitter.warning("kept at NORMAL")
+        emitter.result({"throughput": 42})
+        emitter.test_complete(duration=1.0)
+
+        names = [e["name"] for e in _parse_events(buf)]
+        self.assertEqual(
+            names,
+            ["test.start", "stage", "warning", "result", "test.complete"],
+        )
+
+    def test_verbose_emits_optional_events(self):
+        """VERBOSE adds progress/info/metric on top of NORMAL"""
+        buf = StringIO()
+        emitter = TestEventEmitter(verbosity=VERBOSE, stream=buf)
+        emitter.info("setting up")
+        emitter.warning("slow alloc")
+        emitter.metric("submit_rate", 1250.3, unit="jobs/sec")
+        emitter.progress(1, 1, unit="jobs")
+
+        events = _parse_events(buf)
+        names = sorted(e["name"] for e in events)
+        self.assertEqual(names, ["info", "metric", "progress", "warning"])
+        # Verify metric's optional unit field round-tripped correctly
+        metric_event = next(e for e in events if e["name"] == "metric")
+        self.assertEqual(metric_event["context"]["name"], "submit_rate")
+        self.assertEqual(metric_event["context"]["value"], 1250.3)
+        self.assertEqual(metric_event["context"]["unit"], "jobs/sec")
+
+    def test_log_writes_to_stderr_regardless_of_verbosity(self):
+        """log() writes to stderr, never to the event stream"""
+        buf = StringIO()
+        emitter = TestEventEmitter(verbosity=QUIET, stream=buf)
+
+        old_stderr = sys.stderr
+        sys.stderr = StringIO()
+        try:
+            emitter.log("test message")
+            # Stderr got the prose; the event stream remained empty
+            self.assertIn("test message", sys.stderr.getvalue())
+            self.assertEqual(buf.getvalue(), "")
+        finally:
+            sys.stderr = old_stderr
+
+    def test_test_start_carries_config(self):
+        """Optional config field on test.start is attached when provided"""
+        buf = StringIO()
+        emitter = TestEventEmitter(verbosity=NORMAL, stream=buf)
+        emitter.test_start(
+            "throughput",
+            stages=["execute"],
+            config={"njobs": 1000, "scheduler": "sched-simple"},
+        )
+        events = _parse_events(buf)
+        self.assertEqual(len(events), 1)
+        ctx = events[0]["context"]
+        self.assertEqual(ctx["test_name"], "throughput")
+        self.assertEqual(ctx["stages"], ["execute"])
+        self.assertEqual(ctx["config"], {"njobs": 1000, "scheduler": "sched-simple"})
+
+    def test_unknown_event_name_defaults_to_quiet(self):
+        """emit() with an unrecognized name treats it as QUIET-level"""
+        buf = StringIO()
+        emitter = TestEventEmitter(verbosity=QUIET, stream=buf)
+        emitter.emit("custom.event", {"k": "v"})
+
+        events = _parse_events(buf)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["name"], "custom.event")
+
+    def test_test_error_emits_at_quiet(self):
+        """test_error emits at QUIET (terminal-failure events always pass)"""
+        buf = StringIO()
+        emitter = TestEventEmitter(verbosity=QUIET, stream=buf)
+        emitter.test_error("Resource allocation failed")
+
+        events = _parse_events(buf)
+        self.assertEqual(len(events), 1)
+        ev = events[0]
+        self.assertEqual(ev["name"], "test.error")
+        self.assertEqual(ev["context"]["error"], "Resource allocation failed")
+
+    def test_emit_without_context_omits_context_key(self):
+        """Events with no context payload omit the 'context' key entirely"""
+        # Stripping the key (rather than emitting "context": {}) matches
+        # the RFC 18 contract that context is optional, and keeps the
+        # event stream tidy for consumers that test `if "context" in ev`.
+        buf = StringIO()
+        emitter = TestEventEmitter(verbosity=VERBOSE, stream=buf)
+        emitter.emit("info")  # no context arg
+
+        events = _parse_events(buf)
+        self.assertEqual(len(events), 1)
+        self.assertNotIn("context", events[0])
+
+    def test_emit_flushes_after_write(self):
+        """emit() flushes the stream so live consumers can tail"""
+        # Use a custom stream that distinguishes write() from flush();
+        # StringIO doesn't surface that distinction.
+
+        class _FlushCountingStream:
+            def __init__(self):
+                self.writes = []
+                self.flushes = 0
+
+            def write(self, s):
+                self.writes.append(s)
+
+            def flush(self):
+                self.flushes += 1
+
+        stream = _FlushCountingStream()
+        emitter = TestEventEmitter(verbosity=NORMAL, stream=stream)
+        emitter.stage("s1", stage_index=0, total_stages=1)
+        emitter.stage("s2", stage_index=1, total_stages=2)
+
+        # Each emit() should have triggered at least one flush so a UI
+        # tailing the stream sees events promptly.
+        self.assertGreaterEqual(stream.flushes, 2)
 
 
 if __name__ == "__main__":
