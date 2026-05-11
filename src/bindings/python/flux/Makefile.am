@@ -99,6 +99,8 @@ nobase_fluxpy_PYTHON = \
 	testing/bulkrun.py \
 	testing/fake_resources.py \
 	testing/events.py \
+	testing/schedbench/__init__.py \
+	testing/schedbench/benchmarks.py \
 	utils/parsedatetime/__init__.py \
 	utils/parsedatetime/parsedatetime.py \
 	utils/parsedatetime/warns.py \
