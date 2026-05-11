@@ -135,6 +135,7 @@ dist_fluxcmd_SCRIPTS = \
 	flux-sproc.py \
 	flux-slurm-expiration-sync.py \
 	flux-fake-resources.py \
+	flux-schedbench.py \
 	flux-python$(PYTHON_VERSION)
 
 fluxcmd_PROGRAMS = \
