@@ -22,11 +22,13 @@ from flux.testing.schedbench.benchmarks import (
     simple_jobspec,
 )
 from flux.testing.schedbench.results import BenchmarkResults
+from flux.testing.schedbench.ui import TerminalEmitter
 
 __all__ = (
     "BENCHMARKS",
     "BenchmarkResults",
     "FillMachineBenchmark",
+    "TerminalEmitter",
     "ThroughputBenchmark",
     "simple_jobspec",
 )
