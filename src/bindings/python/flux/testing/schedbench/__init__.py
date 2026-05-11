@@ -21,6 +21,7 @@ from flux.testing.schedbench.benchmarks import (
     ThroughputBenchmark,
     simple_jobspec,
 )
+from flux.testing.schedbench.results import BenchmarkResults
 
 __all__ = (
     "BENCHMARKS",
