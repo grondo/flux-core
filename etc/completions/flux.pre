@@ -2474,6 +2474,128 @@ _flux_python3()
     return 0
 }
 
+# flux-fake-resources(1) completions
+_flux_fake_resources()
+{
+    local cmd=$1
+    local split=false
+    local OPTS="\
+        -N --nnodes= \
+        -c --cores= \
+        -g --gpus= \
+        -H --host-prefix= \
+        --scheduler= \
+        --scheduler-options= \
+        --hwloc-xml= \
+        --amend-r= \
+        -v --verbose \
+    "
+    _flux_split_longopt && split=true
+
+    # File completion for path-valued options
+    case "$prev" in
+        --hwloc-xml | --amend-r)
+            compopt -o filenames
+            COMPREPLY=( $(compgen -f -- "$cur") $(compgen -d -- "$cur") )
+            return 0
+            ;;
+    esac
+    $split && return
+
+    if [[ $cur == --*= ]]; then
+        COMPREPLY=()
+        return 0
+    fi
+    COMPREPLY=( $(compgen -W "${OPTS} -h --help" -- "$cur") )
+    if [[ "${COMPREPLY[@]}" == *= ]]; then
+        compopt -o nospace
+    fi
+    return 0
+}
+
+# flux-schedbench(1) completions
+_flux_schedbench()
+{
+    local cmd=$1
+    local subcmds="run report"
+    local benchmarks="throughput fill-machine"
+    local split=false
+    run_OPTS="\
+        -N --nodes= \
+        --cores-per-node= \
+        --gpus-per-node= \
+        --scheduler= \
+        --scheduler-options= \
+        --watcher= \
+        --tag= \
+        --results-file= \
+        --no-save \
+        -q --quiet \
+        -v --verbose \
+        -x --exec \
+        --ui= \
+        --color= \
+        -n --njobs= \
+        --slot-size= \
+        --slot-cores= \
+        --slot-gpus= \
+    "
+    report_OPTS="\
+        --results-file= \
+        --filter= \
+        -o --format= \
+        --sort= \
+        --no-header \
+    "
+    _flux_split_longopt && split=true
+
+    if [[ $cmd == "schedbench" ]]; then
+        COMPREPLY=( $(compgen -W "${subcmds}" -- "$cur") )
+        return 0
+    fi
+
+    # File completion for path-valued options
+    case "$prev" in
+        --results-file)
+            compopt -o filenames
+            COMPREPLY=( $(compgen -f -- "$cur") $(compgen -d -- "$cur") )
+            return 0
+            ;;
+        --watcher)
+            COMPREPLY=( $(compgen -W "journal per-job" -- "$cur") )
+            return 0
+            ;;
+        --ui)
+            COMPREPLY=( $(compgen -W "auto on off" -- "$cur") )
+            return 0
+            ;;
+        --color)
+            COMPREPLY=( $(compgen -W "auto always never" -- "$cur") )
+            return 0
+            ;;
+    esac
+    $split && return
+
+    # Positional TEST argument: complete benchmark names when
+    # we haven't seen one yet (i.e. when the previous non-option
+    # word is the subcommand itself).
+    if [[ $cur != -* && "$prev" == "$cmd" ]]; then
+        COMPREPLY=( $(compgen -W "${benchmarks}" -- "$cur") )
+        return 0
+    fi
+
+    if [[ $cur == --*= ]]; then
+        COMPREPLY=()
+        return 0
+    fi
+    var="${cmd//-/_}_OPTS"
+    COMPREPLY=( $(compgen -W "${!var} -h --help" -- "$cur") )
+    if [[ "${COMPREPLY[@]}" == *= ]]; then
+        compopt -o nospace
+    fi
+    return 0
+}
+
 _flux_core()
 {
     FLUX_OPTS="-v --verbose -V --version -p --parent -r --root"
@@ -2629,6 +2751,12 @@ _flux_core()
         ;;
     sproc)
         _flux_sproc $subcmd
+        ;;
+    fake-resources)
+        _flux_fake_resources $subcmd
+        ;;
+    schedbench)
+        _flux_schedbench $subcmd
         ;;
     help)
         COMPREPLY=( $(compgen -W "${cmds}" -- "$cur") )
