@@ -1210,3 +1210,7 @@ pc
 pricount
 resultp
 stateful
+wal
+SQLite
+SQLite's
+HEXSTRING
