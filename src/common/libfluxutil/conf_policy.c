@@ -243,6 +243,7 @@ inval:
 static int validate_policy_json (json_t *policy,
                                  const char *key,
                                  const char **default_queue,
+                                 json_t **schedulerp,
                                  flux_error_t *error)
 {
     json_error_t jerror;
@@ -285,6 +286,8 @@ static int validate_policy_json (json_t *policy,
     }
     if (default_queue)
         *default_queue = defqueue;
+    if (schedulerp)
+        *schedulerp = scheduler;
     return 0;
 }
 
@@ -304,12 +307,30 @@ static int validate_policy_config (const flux_conf_t *conf,
         return -1;
     }
     if (policy) {
-        if (validate_policy_json (policy, "policy", &defqueue, error) < 0)
+        if (validate_policy_json (policy, "policy", &defqueue, NULL, error)
+            < 0)
             return -1;
     }
     if (default_queue)
         *default_queue = defqueue;
     return 0;
+}
+
+/* Returns true if 'entry' (a queues.NAME config table) declares a 'parent'
+ * key, i.e. is a virtual queue. '*parentp' is set to the parent name
+ * string (unvalidated) when non-NULL and a parent key is present.
+ */
+static bool queue_entry_is_virtual (json_t *entry, const char **parentp)
+{
+    json_t *parent;
+
+    if ((parent = json_object_get (entry, "parent"))
+        && json_is_string (parent)) {
+        if (parentp)
+            *parentp = json_string_value (parent);
+        return true;
+    }
+    return false;
 }
 
 static int validate_queues_config (const flux_conf_t *conf,
@@ -336,28 +357,45 @@ static int validate_queues_config (const flux_conf_t *conf,
                        " not a table");
             goto inval;
         }
+        /* Pass 1: per-entry syntax validation (as before, plus optional
+         * 'parent' string key).
+         */
         json_object_foreach (queues, name, entry) {
             json_error_t jerror;
             json_t *policy = NULL;
             json_t *requires = NULL;
+            json_t *parent = NULL;
 
             if (json_unpack_ex (entry,
                                 &jerror,
                                 0,
-                                "{s?o s?o !}",
+                                "{s?o s?o s?o !}",
                                 "policy", &policy,
-                                "requires", &requires) < 0) {
+                                "requires", &requires,
+                                "parent", &parent) < 0) {
                 errprintf (error,
                            "error parsing [queues.%s] config table: %s",
                            name,
                            jerror.text);
                 goto inval;
             }
+            if (parent && !json_is_string (parent)) {
+                errprintf (error,
+                           "error parsing [queues.%s] config table:"
+                           " 'parent' must be a string",
+                           name);
+                goto inval;
+            }
             if (policy) {
                 char key[1024];
                 const char *defqueue;
+                json_t *scheduler = NULL;
                 snprintf (key, sizeof (key), "queues.%s.policy", name);
-                if (validate_policy_json (policy, key, &defqueue, error) < 0)
+                if (validate_policy_json (policy,
+                                          key,
+                                          &defqueue,
+                                          &scheduler,
+                                          error) < 0)
                     return -1;
                 if (defqueue) {
                     errprintf (error,
@@ -366,8 +404,23 @@ static int validate_queues_config (const flux_conf_t *conf,
                                name);
                     goto inval;
                 }
+                if (parent && scheduler) {
+                    errprintf (error,
+                               "error parsing [queues.%s] config table:"
+                               " a virtual queue must not set"
+                               " 'policy.scheduler'",
+                               name);
+                    goto inval;
+                }
             }
             if (requires) {
+                if (parent) {
+                    errprintf (error,
+                               "error parsing [queues.%s] config table:"
+                               " a virtual queue must not set 'requires'",
+                               name);
+                    goto inval;
+                }
                 const char *banned_property_chars = " \t!&'\"`'|()";
                 if (!is_string_array (requires, banned_property_chars)) {
                     errprintf (error,
@@ -379,8 +432,42 @@ static int validate_queues_config (const flux_conf_t *conf,
                 }
             }
         }
+        /* Pass 2: cross-queue virtual queue relationships. This requires
+         * all entries to have already passed syntax validation above, and
+         * looks up parent entries directly out of the [queues] table
+         * (json_object_get, not the job-manager's queues.[ch] table, which
+         * does not exist yet when config is first validated).
+         */
+        json_object_foreach (queues, name, entry) {
+            const char *parent_name;
+
+            if (queue_entry_is_virtual (entry, &parent_name)) {
+                json_t *parent_entry;
+
+                if (!(parent_entry = json_object_get (queues, parent_name))) {
+                    errprintf (error,
+                               "error parsing [queues.%s] config table:"
+                               " parent queue '%s' is not configured",
+                               name,
+                               parent_name);
+                    goto inval;
+                }
+                if (queue_entry_is_virtual (parent_entry, NULL)) {
+                    errprintf (error,
+                               "error parsing [queues.%s] config table:"
+                               " parent queue '%s' is itself a virtual"
+                               " queue",
+                               name,
+                               parent_name);
+                    goto inval;
+                }
+            }
+        }
     }
     if (default_queue) {
+        /* A virtual queue may be the default queue, so only require that
+         * the name appear in [queues], not that it be non-virtual.
+         */
         if (!queues || !json_object_get (queues, default_queue)) {
             errprintf (error,
                        "the [policy] config table defines a default queue %s"
