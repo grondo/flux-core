@@ -44,7 +44,17 @@ struct queue {
     bool is_started;            /* current queue state */
     bool is_started_sticky;     /* tracks is_started unless --nocheckpoint */
     char *stop_reason;          /* reason if stopped (optionally set) */
-    json_t *requires;           /* required properties array */
+    json_t *requires;           /* required properties array (own; a
+                                  * virtual queue's is always NULL - see
+                                  * queue_root() for the effective value)
+                                  */
+    struct queue *parent;       /* resolved parent queue (RFC 33 virtual
+                                  * queues), or NULL if not virtual. Not
+                                  * owned; borrowed from the same queues
+                                  * table. Inheritance is one level
+                                  * (validated elsewhere) so this is
+                                  * never itself virtual.
+                                  */
     struct queues *queues;      /* back-pointer for notify */
 };
 
@@ -93,6 +103,112 @@ static void queue_destructor (void **item)
     }
 }
 
+/* Extract the "parent" key from a queue's own config entry 'entry' (may
+ * be NULL). On success, '*namep' is set to the borrowed name string,
+ * or NULL if 'entry' has no "parent" key. Returns -1 if "parent" is
+ * present but not a string.
+ */
+static int entry_parent_name (json_t *entry, const char **namep)
+{
+    *namep = NULL;
+    if (!entry)
+        return 0;
+    return json_unpack (entry, "{s?s}", "parent", namep);
+}
+
+/* True if 'name's config entry in 'table' (the full desired [queues]
+ * config, or NULL) declares a "parent", i.e. 'name' is to be virtual.
+ * Used by resolve_parent() below to check a candidate parent's own
+ * virtual-ness directly against the desired config, since during
+ * queues_configure()'s second pass the candidate's own ->parent
+ * pointer may not have been resolved yet (JSON object iteration order
+ * is arbitrary).
+ */
+static bool entry_is_virtual (json_t *table, const char *name)
+{
+    const char *parent_name;
+
+    return table
+        && entry_parent_name (json_object_get (table, name),
+                              &parent_name) == 0
+        && parent_name != NULL;
+}
+
+/* Resolve virtual queue 'q's parent (RFC 33 virtual queues) to a
+ * struct queue pointer, storing it in 'q->parent'. 'entry' is q's own
+ * desired config table: the json_t passed to queues_add()/
+ * queues_update(), or (from queues_configure()) q's entry within the
+ * full desired [queues] table 'table'. Inheritance is one level, so
+ * the parent must already be a named, non-virtual queue in the table.
+ *
+ * 'table' is non-NULL only when called from queues_configure()'s
+ * second pass (see entry_is_virtual() above for why); queues_add()/
+ * queues_update() pass NULL and rely on queue_is_virtual() of the
+ * already-resolved parent instead, since a standalone add/update
+ * resolves 'parent' atomically and leaves no stale pointers around.
+ *
+ * Returns 0 (with q->parent left NULL) if q is not virtual. Returns -1
+ * with 'error' filled in if 'parent' is malformed, missing, or itself
+ * virtual; conf_policy.c validates these same rules ahead of time in
+ * the normal broker path, but this class must not segfault (or
+ * silently misbehave) on bad input reaching it directly.
+ */
+static int resolve_parent (struct queue *q,
+                           json_t *entry,
+                           json_t *table,
+                           flux_error_t *error)
+{
+    struct queue *parent;
+    struct queues *queues = q->queues;
+    const char *parent_name;
+
+    q->parent = NULL;
+    if (entry_parent_name (entry, &parent_name) < 0) {
+        errprintf (error,
+                  "queue '%s': 'parent' must be a string",
+                  q->name ? q->name : "(anon)");
+        errno = EINVAL;
+        return -1;
+    }
+    if (!parent_name)
+        return 0;
+    if (!queues->have_named
+        || !(parent = zhashx_lookup (queues->named, parent_name))) {
+        errprintf (error,
+                  "queue '%s': parent queue '%s' is not configured",
+                  q->name ? q->name : "(anon)",
+                  parent_name);
+        errno = EINVAL;
+        return -1;
+    }
+    if (table ? entry_is_virtual (table, parent_name)
+              : queue_is_virtual (parent)) {
+        errprintf (error,
+                  "queue '%s': parent queue '%s' is itself a virtual queue",
+                  q->name ? q->name : "(anon)",
+                  parent_name);
+        errno = EINVAL;
+        return -1;
+    }
+    q->parent = parent;
+    return 0;
+}
+
+/* Parse the 'requires' config-derived field shared by queue_alloc() and
+ * queues_update(). 'parent' (RFC 33 virtual queues) is handled
+ * separately by resolve_parent() above, straight from the config JSON.
+ */
+static int queue_parse_config (struct queue *q, json_t *config)
+{
+    json_t *requires = NULL;
+
+    if (config && json_unpack (config, "{s?O}", "requires", &requires) < 0)
+        return -1;
+    json_decref (q->requires);
+    q->requires = requires;   /* may be NULL */
+    return 0;
+}
+
 static struct queue *queue_alloc (struct queues *queues,
                                   const char *name,
                                   json_t *config)
@@ -106,7 +222,7 @@ static struct queue *queue_alloc (struct queues *queues,
         goto error;
     q->is_enabled = true;
 
-    if (config && json_unpack (config, "{s?O}", "requires", &q->requires) < 0)
+    if (queue_parse_config (q, config) < 0)
         goto error;
 
     /* The anonymous queue begins life started; named queues do not. */
@@ -267,10 +383,19 @@ static int remove_all_named_queues (struct queues *queues)
     return 0;
 }
 
-struct queue *queues_add (struct queues *queues,
-                          const char *name,
-                          json_t *config,
-                          flux_error_t *error)
+/* Internal: add a queue to the table without resolving its 'parent'
+ * (RFC 33 virtual queues) to a pointer. Used by
+ * queues_configure()'s per-entry loop, which defers resolution to a
+ * second pass across the *whole* table once every add/update/remove for
+ * this configure call has been applied - JSON object iteration order is
+ * arbitrary, so a virtual queue's parent may be processed after it, and
+ * a reload may re-point an existing queue's already-resolved parent.
+ * See queues_configure().
+ */
+static struct queue *queue_add_internal (struct queues *queues,
+                                         const char *name,
+                                         json_t *config,
+                                         flux_error_t *error)
 {
     struct queue *q;
 
@@ -337,6 +462,33 @@ struct queue *queues_add (struct queues *queues,
     return q;
 }
 
+struct queue *queues_add (struct queues *queues,
+                          const char *name,
+                          json_t *config,
+                          flux_error_t *error)
+{
+    struct queue *q;
+
+    if (!(q = queue_add_internal (queues, name, config, error)))
+        return NULL;
+    /* Unlike queues_configure() (which defers to a whole-table second
+     * pass - see queue_add_internal() above), a standalone add has no
+     * further "table is now fully populated" step coming, so resolve
+     * 'parent' immediately. A named queue whose config names a
+     * missing or virtual parent fails cleanly here (EINVAL) rather
+     * than leaving a half-configured queue in the table; conf_policy.c
+     * validates the same rules ahead of time in the normal broker
+     * config path, but this class must not segfault (or worse, link a
+     * stale/wrong parent pointer) on bad input reaching it directly.
+     */
+    if (resolve_parent (q, config, NULL, error) < 0) {
+        if (name)
+            zhashx_delete (queues->named, name);
+        return NULL;
+    }
+    return q;
+}
+
 int queues_remove (struct queues *queues, const char *name)
 {
     struct queue *q;
@@ -354,21 +506,38 @@ int queues_remove (struct queues *queues, const char *name)
     return 0;
 }
 
+/* Internal: refresh config-derived fields of an existing queue without
+ * resolving 'parent' to a pointer - see queue_add_internal() above for
+ * why queues_configure()'s per-entry loop needs this variant.
+ */
+static int queue_update_internal (struct queues *queues,
+                                  struct queue *q,
+                                  json_t *config,
+                                  flux_error_t *error)
+{
+    if (queue_parse_config (q, config) < 0) {
+        errprintf (error, "out of memory");
+        errno = ENOMEM;
+        return -1;
+    }
+    notify (queues, q, "update");
+    return 0;
+}
+
 int queues_update (struct queues *queues,
                    struct queue *q,
                    json_t *config,
                    flux_error_t *error)
 {
-    json_t *requires = NULL;
-
-    if (config && json_unpack (config, "{s?O}", "requires", &requires) < 0) {
-        errprintf (error, "out of memory");
-        errno = ENOMEM;
+    if (queue_update_internal (queues, q, config, error) < 0)
         return -1;
-    }
-    json_decref (q->requires);
-    q->requires = requires;   /* may be NULL */
-    notify (queues, q, "update");
+    /* A reload may re-parent (or un-parent/parent) an existing queue;
+     * re-resolve now. As with queues_add(), a standalone update has no
+     * later whole-table pass, so do this immediately rather than
+     * leaving a stale or NULL 'parent' pointer on bad input.
+     */
+    if (resolve_parent (q, config, NULL, error) < 0)
+        return -1;
     return 0;
 }
 
@@ -406,12 +575,19 @@ int queues_configure (struct queues *queues,
             zlistx_destroy (&names);
         }
 
-        /* Add new queues / update existing ones */
+        /* Add new queues / update existing ones. Parent resolution
+         * (RFC 33 virtual queues) is deferred to a second pass below,
+         * once the table reflects the full desired config: JSON object
+         * iteration order is arbitrary, so a virtual queue's parent
+         * entry may not have been added/updated yet when the virtual
+         * queue itself is processed, and a reload may change which
+         * queue is whose parent.
+         */
         json_object_foreach (config, name, value) {
             struct queue *q;
             if (!queues->have_named
                 || !(q = zhashx_lookup (queues->named, name))) {
-                if (!queues_add (queues, name, value, error))
+                if (!queue_add_internal (queues, name, value, error))
                     return -1;
             }
             else {
@@ -419,9 +595,27 @@ int queues_configure (struct queues *queues,
                  * Administrative state (enable/start bits, reasons,
                  * sticky) is preserved per b362f73d7.
                  */
-                if (queues_update (queues, q, value, error) < 0)
+                if (queue_update_internal (queues, q, value, error) < 0)
                     return -1;
             }
+        }
+
+        /* Second pass: now that every queue in the desired config is
+         * present with its config-derived fields refreshed, resolve
+         * 'parent' pointers, reading each candidate parent's own
+         * "parent" key straight out of 'config' (see entry_is_virtual())
+         * rather than trusting a not-yet-resolved ->parent pointer. A
+         * bad parent here indicates config that conf_policy_validate()
+         * should have already rejected, so treat it as an internal
+         * error rather than trying to convey a detailed message
+         * (matching the N.B. in queue.c's queue_configure()).
+         */
+        json_object_foreach (config, name, value) {
+            struct queue *q;
+            if (queues->have_named
+                && (q = zhashx_lookup (queues->named, name))
+                && resolve_parent (q, value, config, error) < 0)
+                return -1;
         }
     }
     else {
@@ -448,24 +642,52 @@ static int set_string (json_t *o, const char *key, const char *val)
     return 0;
 }
 
+/* "start" is the effective started state. "blocked":true is included
+ * only when the queue is started but effectively stopped by an external
+ * condition (scheduler offline, or a virtual queue's parent stopped),
+ * with a synthesized "stop_reason" saying why. A consumer can derive
+ * the queue's own started bit as (start || blocked).
+ */
 json_t *queue_status_encode (struct queue *q, bool sched_ready)
 {
     json_t *o;
     bool start;
+    bool blocked = false;
     const char *stop_reason;
+    char parent_reason[128];
 
     if (!sched_ready) {
         start = false;
+        blocked = q->is_started;
         stop_reason = "Scheduler is offline";
     }
     else {
-        start = q->is_started;
+        start = queue_is_started_effective (q);
         stop_reason = q->stop_reason;
+        if (!start && q->is_started) {
+            /* Virtual queue with own bit started but parent stopped */
+            blocked = true;
+            (void)snprintf (parent_reason,
+                            sizeof (parent_reason),
+                            "parent queue '%s' is stopped",
+                            queue_name (queue_parent (q)));
+            stop_reason = parent_reason;
+        }
     }
     if (!(o = json_pack ("{s:b s:b}",
                          "enable", q->is_enabled,
                          "start", start)))
         goto error;
+    if (queue_is_virtual (q)) {
+        if (set_string (o, "parent", queue_name (queue_parent (q))) < 0)
+            goto error;
+    }
+    if (blocked) {
+        if (json_object_set_new (o, "blocked", json_true ()) < 0) {
+            errno = ENOMEM;
+            goto error;
+        }
+    }
     if (!q->is_enabled) {
         if (set_string (o, "disable_reason", q->disable_reason) < 0)
             goto error;
@@ -691,6 +913,28 @@ bool queue_is_started (struct queue *q)
 const char *queue_stop_reason (struct queue *q)
 {
     return q->stop_reason;
+}
+
+/* Virtual queue (RFC 33) accessors */
+
+bool queue_is_virtual (struct queue *q)
+{
+    return q->parent != NULL;
+}
+
+struct queue *queue_parent (struct queue *q)
+{
+    return q->parent;
+}
+
+struct queue *queue_root (struct queue *q)
+{
+    return q->parent ? q->parent : q;
+}
+
+bool queue_is_started_effective (struct queue *q)
+{
+    return q->is_started && queue_root (q)->is_started;
 }
 
 /* Per-queue mutators (fire notify) */
