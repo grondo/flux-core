@@ -51,12 +51,26 @@ class DefaultsConfig:
             self.queue_defaults(queue)
 
     def queue_defaults(self, name):
-        """Create a copy of self.defaults updated with queue-specific values"""
+        """Create a copy of self.defaults updated with queue-specific values
+
+        Effective defaults are layered: global defaults, then (if 'name'
+        is a virtual queue, RFC 33) the parent queue's own defaults,
+        then this queue's own defaults - each layer overlaid per-key
+        over the last. Inheritance is one level (validated by
+        conf_policy.c), so there is no chain to walk beyond the parent.
+        """
         defaults = copy.deepcopy(self.defaults)
         if name and self.queues:
             if name not in self.queues:
                 raise ValueError(f"Invalid queue '{name}' specified")
             qconf = self.queues[name]
+            try:
+                parent = qconf["parent"]
+                pconf = self.queues[parent]
+                pdefaults = pconf["policy"]["jobspec"]["defaults"]["system"]
+                defaults.update(pdefaults)
+            except KeyError:
+                pass
             try:
                 qdefaults = qconf["policy"]["jobspec"]["defaults"]["system"]
                 defaults.update(qdefaults)
