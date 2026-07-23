@@ -27,7 +27,21 @@ class QueueConfig:
 
     def queue_properties(self, name):
         try:
-            return self.queues[name]["requires"]
+            entry = self.queues[name]
+        except KeyError:
+            return None
+        # A virtual queue (RFC 33) has no 'requires' of its own -
+        # inject the parent's instead, since that is what makes the
+        # job schedule as part of the parent's job list. Inheritance
+        # is one level (validated by conf_policy.c), so no chain to
+        # walk.
+        try:
+            parent = entry["parent"]
+            entry = self.queues[parent]
+        except KeyError:
+            pass
+        try:
+            return entry["requires"]
         except KeyError:
             return None
 
