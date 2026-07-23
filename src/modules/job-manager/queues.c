@@ -355,7 +355,11 @@ bool queues_queue_is_started (struct queues *queues, const char *name)
             return false;
         q = queues->anon;
     }
-    return q->is_started;
+    /* RFC 33 virtual queues: a job is eligible for scheduling only
+     * when both its own queue and (if virtual) the parent queue are
+     * started.  For a non-virtual queue, queue_root (q) == q.
+     */
+    return q->is_started && queue_root (q)->is_started;
 }
 
 /* First-class add/remove/update primitives */
