@@ -247,14 +247,53 @@ error:
         flux_log_error (h, "error responding to job-manager.queue-enable");
 }
 
+/* True if a job in queue 'job_queue' is covered by 'name' for
+ * enqueue_jobs()/dequeue_jobs() purposes (RFC 33 virtual queues).
+ * 'name' NULL means "all queues" (anon mode, or an operation with
+ * --all). Otherwise:
+ *  - if 'name' resolves to a non-virtual (root) queue, coverage
+ *    extends to that queue's jobs plus the jobs of every virtual
+ *    queue whose parent it is - a vqueue's jobs are scheduled as
+ *    part of its parent's job list, so an operation on the parent
+ *    (e.g. the parent stopping) must reach them too.
+ *  - if 'name' resolves to a virtual queue, coverage is that vqueue
+ *    exactly - an operation on one vqueue must not affect its parent
+ *    or sibling vqueues.
+ *  - if 'name' no longer resolves to a configured queue (e.g. removed
+ *    by a reload - such jobs are intentionally left in place, see the
+ *    on_queue_change() N.B. above) or 'job_queue' is stale likewise,
+ *    fall back to an exact name comparison, matching pre-vqueue
+ *    behavior.
+ */
+static bool in_domain (struct queue_ctx *qctx,
+                       const char *name,
+                       const char *job_queue)
+{
+    struct queue *target;
+    struct queue *jq;
+
+    if (!name)
+        return true;
+    if (!job_queue)
+        return false;
+    if (!(target = queues_lookup (qctx->queues, name, NULL)))
+        return streq (job_queue, name);
+    if (!(jq = queues_lookup (qctx->queues, job_queue, NULL)))
+        return streq (job_queue, name);
+    if (queue_is_virtual (target))
+        return jq == target;
+    return queue_root (jq) == target;
+}
+
 static int enqueue_jobs (struct queue_ctx *qctx, const char *name)
 {
     struct job *job = zhashx_first (qctx->ctx->active_jobs);
     while (job) {
-        if (!name || (job->queue && streq (job->queue, name))) {
+        if (in_domain (qctx, name, job->queue)) {
             if (!job->alloc_queued
                 && !job->alloc_pending
-                && job->state == FLUX_JOB_STATE_SCHED) {
+                && job->state == FLUX_JOB_STATE_SCHED
+                && queue_started (qctx, job)) {
                 if (alloc_enqueue_alloc_request (qctx->ctx->alloc, job) < 0)
                     return -1;
                 if (alloc_queue_recalc_pending (qctx->ctx->alloc) < 0)
@@ -272,7 +311,7 @@ static void dequeue_jobs (struct queue_ctx *qctx, const char *name)
         || alloc_pending_count (qctx->ctx->alloc) > 0) {
         struct job *job = zhashx_first (qctx->ctx->active_jobs);
         while (job) {
-            if (!name || (job->queue && streq (job->queue, name))) {
+            if (in_domain (qctx, name, job->queue)) {
                 if (job->alloc_queued)
                     alloc_dequeue_alloc_request (qctx->ctx->alloc, job);
                 else if (job->alloc_pending)
@@ -413,11 +452,16 @@ static int constraints_match_check (struct queue_ctx *qctx,
         return -1;
 
     /*  If current queue has constraints, then create a constraint object
-     *  for equivalence test below:
+     *  for equivalence test below. Use the effective (root) requires:
+     *  a virtual queue's own requires is always NULL (enforced by
+     *  conf_policy.c), but its jobs carry the parent's property
+     *  constraint (injected by the constraints frobnicator plugin), so
+     *  the *root's* requires is what must match here.
      */
-    if (queue_requires (q)
+    if (queue_requires (queue_root (q))
         && !(expected = json_pack ("{s:O}",
-                                   "properties", queue_requires (q)))) {
+                                   "properties",
+                                   queue_requires (queue_root (q))))) {
         errprintf (errp, "failed to get constraints for current queue");
         goto out;
     }
@@ -504,9 +548,12 @@ static int queue_update_cb (flux_plugin_t *p,
      *  and append an additional update of the job constraints.
      *
      *  This is done via two different calls below dependent on whether the
-     *  new queue has any constraints.
+     *  new queue has any constraints. As above, use the effective (root)
+     *  requires: a job moved into a virtual queue must pick up the
+     *  parent's constraint, since that is what makes it schedule as
+     *  part of the parent's job list.
      */
-    if (queue_requires (newq)) {
+    if (queue_requires (queue_root (newq))) {
         /*  Replace current constraints with those of the new queue
          */
         rc = flux_plugin_arg_pack (args,
@@ -515,7 +562,8 @@ static int queue_update_cb (flux_plugin_t *p,
                                    "feasibility", 1,
                                    "updates",
                                     "attributes.system.constraints",
-                                     "properties", queue_requires (newq));
+                                     "properties",
+                                     queue_requires (queue_root (newq)));
     }
     else {
         /*  New queue has no requirements. Set constraints to empty object.
