@@ -118,11 +118,32 @@ json_t *queues_list_encode (struct queues *queues);
  * If q == NULL, assume anonymous queue.
  */
 const char *queue_name (struct queue *q);
+/* Own requires; NULL for a virtual queue. Use queue_root() to get the
+ * effective requires.
+ */
 json_t *queue_requires (struct queue *q);
 bool queue_is_enabled (struct queue *q);
 const char *queue_disable_reason (struct queue *q);
+/* Own started bit; see queue_is_started_effective() below for a
+ * virtual queue's effective state.
+ */
 bool queue_is_started (struct queue *q);
 const char *queue_stop_reason (struct queue *q);
+
+/* Virtual queue (RFC 33) accessors.
+ *
+ * A queue is virtual iff its config sets 'parent'. Inheritance is one
+ * level: a vqueue's parent is validated (conf_policy.c and the second
+ * validation pass below) to never itself be virtual, so there is no
+ * chain to walk - queue_root() is a single pointer dereference.
+ */
+bool queue_is_virtual (struct queue *q);
+/* NULL if not virtual */
+struct queue *queue_parent (struct queue *q);
+/* 'q's parent if virtual, else 'q' itself */
+struct queue *queue_root (struct queue *q);
+/* Own started bit AND root's started bit */
+bool queue_is_started_effective (struct queue *q);
 
 /* Per-queue mutators
  * These methods fire notification.
