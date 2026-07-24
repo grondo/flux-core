@@ -301,6 +301,29 @@ static struct list_constraint *create_name_constraint (struct match_ctx *mctx,
     return create_string_constraint (mctx, "name", values, match_name, errp);
 }
 
+/* RFC 33 virtual queues: a constraint naming queue N matches a job
+ * whose own queue is N, or whose queue is a virtual queue with parent
+ * N, since vqueue jobs are scheduled as part of the parent's job
+ * list. A constraint naming a virtual queue matches only that
+ * virtual queue's jobs (no expansion, inheritance is one level).
+ */
+static bool queue_name_matches (struct match_ctx *mctx,
+                                const char *name,
+                                const char *job_queue)
+{
+    const char *parent;
+
+    if (!job_queue)
+        return false;
+    if (streq (name, job_queue))
+        return true;
+    if (mctx->queue_parents
+        && (parent = zhashx_lookup (mctx->queue_parents, job_queue))
+        && streq (name, parent))
+        return true;
+    return false;
+}
+
 static int match_queue (struct list_constraint *c,
                         const struct job *job,
                         unsigned int *comparisons,
@@ -310,7 +333,7 @@ static int match_queue (struct list_constraint *c,
     while (queue) {
         if (inc_check_comparison (c->mctx, comparisons, errp) < 0)
             return -1;
-        if (job->queue && streq (queue, job->queue))
+        if (queue_name_matches (c->mctx, queue, job->queue))
             return 1;
         queue = zlistx_next (c->values);
     }
@@ -918,11 +941,54 @@ static int config_parse_max_comparisons (struct match_ctx *mctx,
     return 0;
 }
 
+/* RFC 33 virtual queues: rebuild the vqueue name to parent name map
+ * from the [queues] config table. v1 scope: job-list reads config
+ * directly for this, as does job-manager's queue.c; #7737 (runtime
+ * queues) will migrate all consumers to the streaming queue-list RPC.
+ */
+static int config_parse_queue_parents (struct match_ctx *mctx,
+                                       const flux_conf_t *conf,
+                                       flux_error_t *errp)
+{
+    json_t *queues = NULL;
+    const char *name;
+    json_t *entry;
+
+    zhashx_purge (mctx->queue_parents);
+
+    if (flux_conf_unpack (conf, NULL, "{s?o}", "queues", &queues) < 0
+        || !queues)
+        return 0;
+
+    json_object_foreach (queues, name, entry) {
+        json_t *parent;
+        char *parent_name;
+
+        if (!(parent = json_object_get (entry, "parent"))
+            || !json_is_string (parent))
+            continue;
+        if (!(parent_name = strdup (json_string_value (parent)))) {
+            errprintf (errp, "out of memory building queue parent map");
+            return -1;
+        }
+        if (zhashx_insert (mctx->queue_parents, name, parent_name) < 0) {
+            free (parent_name);
+            errprintf (errp,
+                      "error building queue parent map entry for '%s'",
+                      name);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 int job_match_config_reload (struct match_ctx *mctx,
                              const flux_conf_t *conf,
                              flux_error_t *errp)
 {
-    return config_parse_max_comparisons (mctx, conf, errp);
+    if (config_parse_max_comparisons (mctx, conf, errp) < 0)
+        return -1;
+    return config_parse_queue_parents (mctx, conf, errp);
 }
 
 struct match_ctx *match_ctx_create (flux_t *h)
@@ -934,9 +1000,22 @@ struct match_ctx *match_ctx_create (flux_t *h)
         return NULL;
     mctx->h = h;
 
+    if (!(mctx->queue_parents = zhashx_new ())) {
+        flux_log_error (h, "failed to create queue parent map");
+        goto error;
+    }
+    zhashx_set_destructor (mctx->queue_parents, wrap_free);
+
     if (config_parse_max_comparisons (mctx,
                                       flux_get_conf (mctx->h),
                                       &error) < 0) {
+        flux_log (mctx->h, LOG_ERR, "%s", error.text);
+        goto error;
+    }
+
+    if (config_parse_queue_parents (mctx,
+                                    flux_get_conf (mctx->h),
+                                    &error) < 0) {
         flux_log (mctx->h, LOG_ERR, "%s", error.text);
         goto error;
     }
@@ -974,8 +1053,10 @@ error:
 
 void match_ctx_destroy (struct match_ctx *mctx)
 {
-    if (mctx)
+    if (mctx) {
+        zhashx_destroy (&mctx->queue_parents);
         free (mctx);
+    }
 }
 
 /* vi: ts=4 sw=4 expandtab
