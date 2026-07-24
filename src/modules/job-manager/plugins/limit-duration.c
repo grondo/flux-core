@@ -168,14 +168,39 @@ static int queues_parse (zhashx_t **zhp,
     if ((queues = json_object_get (conf, "queues"))) {
         const char *name;
         json_t *entry;
-        double duration;
         flux_error_t e;
 
         json_object_foreach (queues, name, entry) {
-            if (duration_parse (&duration, entry, &e) < 0) {
+            double duration = DURATION_INVALID;
+            double own;
+            json_t *parent = json_object_get (entry, "parent");
+
+            /* RFC 33 virtual queues: a vqueue with no own duration
+             * limit inherits its parent queue's limit. Read the
+             * parent's entry directly out of the [queues] table
+             * rather than the hash being built here, since
+             * json_object_foreach() iteration order is arbitrary
+             * and the parent may not have been processed yet. If
+             * the parent name is not found (rejected by config
+             * validation, but do not crash on it here), the vqueue
+             * simply has no inherited limit.
+             */
+            if (parent && json_is_string (parent)) {
+                const char *parent_name = json_string_value (parent);
+                json_t *parent_entry = json_object_get (queues, parent_name);
+
+                if (parent_entry
+                    && duration_parse (&duration, parent_entry, &e) < 0) {
+                    errprintf (error, "queues.%s.%s", parent_name, e.text);
+                    goto error;
+                }
+            }
+            if (duration_parse (&own, entry, &e) < 0) {
                 errprintf (error, "queues.%s.%s", name, e.text);
                 goto error;
             }
+            if (own != DURATION_INVALID)
+                duration = own;
             queues_insert (zh, name, duration);
         }
     }

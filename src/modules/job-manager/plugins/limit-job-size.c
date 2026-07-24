@@ -280,13 +280,39 @@ static int queues_parse (zhashx_t **zhp,
         const char *name;
         json_t *entry;
         struct limits limits;
+        struct limits own;
         flux_error_t e;
 
         json_object_foreach (queues, name, entry) {
-            if (limits_parse (&limits, entry, &e) < 0) {
+            json_t *parent = json_object_get (entry, "parent");
+
+            limits_clear (&limits);
+
+            /* RFC 33 virtual queues: a vqueue inherits its parent
+             * queue's job-size limits, overlaid per-key by its own.
+             * Read the parent's entry directly out of the [queues]
+             * table rather than the hash being built here, since
+             * json_object_foreach() iteration order is arbitrary
+             * and the parent may not have been processed yet. If
+             * the parent name is not found (rejected by config
+             * validation, but do not crash on it here), the vqueue
+             * simply has no inherited limits.
+             */
+            if (parent && json_is_string (parent)) {
+                const char *parent_name = json_string_value (parent);
+                json_t *parent_entry = json_object_get (queues, parent_name);
+
+                if (parent_entry
+                    && limits_parse (&limits, parent_entry, &e) < 0) {
+                    errprintf (error, "queues.%s.%s", parent_name, e.text);
+                    goto error;
+                }
+            }
+            if (limits_parse (&own, entry, &e) < 0) {
                 errprintf (error, "queues.%s.%s", name, e.text);
                 goto error;
             }
+            limits_override (&limits, &own);
             queues_insert (zh, name, &limits);
         }
     }
