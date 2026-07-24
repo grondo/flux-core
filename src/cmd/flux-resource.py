@@ -205,11 +205,16 @@ class QueueResources:
         self._queues = {}
         if "queues" not in config:
             return
-        for queue in config["queues"]:
-            if "requires" in config["queues"][queue]:
-                result = resource_set.copy_constraint(
-                    {"properties": config["queues"][queue]["requires"]}
-                )
+        for queue, entry in config["queues"].items():
+            # RFC 33 virtual queues have no "requires" of their own; they
+            # share their parent queue's resource slice. Resolve to the
+            # parent's entry so that -q <vqueue> selects the same ranks as
+            # the parent, rather than wrongly matching every node via the
+            # "else" branch below.
+            if "parent" in entry:
+                entry = config["queues"].get(entry["parent"], {})
+            if "requires" in entry:
+                result = resource_set.copy_constraint({"properties": entry["requires"]})
             else:
                 result = resource_set.copy()
             self._queues[queue] = result
@@ -561,6 +566,17 @@ class ResourceSetExtra(ResourceSet):
                         continue
                 elif key in self._hidden_queues:
                     continue
+                # RFC 33 virtual queues have no "requires" of their own;
+                # they share their parent's resource slice. Only emit a
+                # vqueue name when it was explicitly requested via -q
+                # (i.e. is in the filter): otherwise it would match every
+                # node in the default QUEUE column via its resolved
+                # parent's requires. Resolve the membership test against
+                # the parent's entry either way.
+                if "parent" in value:
+                    if not self._queue_filter:
+                        continue
+                    value = self.flux_config["queues"].get(value["parent"], {})
                 if "requires" not in value or set(value["requires"]).issubset(
                     set(properties)
                 ):
@@ -633,11 +649,20 @@ def resources_uniq_lines(
     #  Get a list of configured queues if a specific list of queues
     #  was not supplied by the caller. Hidden queues are excluded from the
     #  default list but are still visible when explicitly requested via -q.
+    #  RFC 33 virtual queues are excluded from this default list, since
+    #  they share their parent's resources and would otherwise duplicate
+    #  the parent's rows. When requested explicitly via -q they are kept
+    #  (queues == args.queue is truthy, so this branch is skipped) and
+    #  resolve to their parent's slice in ResourceSetExtra.queue.
     #  If no queues are configured then one "anonymous" queue is simulated
     #  with [None].
     if not queues:
         if config and "queues" in config:
-            queues = [q for q in config["queues"] if q not in hidden_queues]
+            queues = [
+                q
+                for q, entry in config["queues"].items()
+                if q not in hidden_queues and "parent" not in entry
+            ]
             if not queues:
                 queues = [None]
         else:
