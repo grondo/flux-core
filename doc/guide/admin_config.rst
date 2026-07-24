@@ -575,6 +575,12 @@ define a default queue.
 Finally, queues can override the ``[policy]`` table on a per queue basis.
 This is useful for setting queue-specific limits.
 
+A queue may also be configured as a *virtual queue* (RFC 33) by setting
+``parent`` to the name of another queue, in which case it shares that
+queue's resources and inherits its policy, but may be started, stopped,
+enabled, or disabled independently. See :man5:`flux-config-queues` for
+details.
+
 Here is an example that puts these concepts together:
 
 .. code-block:: toml
@@ -630,8 +636,11 @@ is rejected.
   ``nnodes`` *and* ``ncores`` limits when configuring job size policy limits.
 
 Limits are global when set in the top level ``[policy]`` table.  Global limits
-may be overridden by a ``policy`` table within a ``[queues]`` entry.  Here is
-an example which implements duration and job size limits for two queues:
+may be overridden by a ``policy`` table within a ``[queues]`` entry. A virtual
+queue's ``policy`` table overrides its parent queue's limits on a per-key
+basis, so a virtual queue that overrides only the duration limit still
+inherits the parent's job size limits. Here is an example which implements
+duration and job size limits for two queues:
 
 .. code-block:: toml
 
