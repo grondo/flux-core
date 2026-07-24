@@ -15,6 +15,7 @@
 #include <flux/core.h>
 
 #include "src/common/libtap/tap.h"
+#include "src/common/libczmqcontainers/czmq_containers.h"
 #include "src/modules/job-list/job_data.h"
 #include "src/modules/job-list/match.h"
 #include "ccan/str/str.h"
@@ -476,6 +477,135 @@ static void test_basic_queue (void)
         list_constraint_destroy (c);
         ctests++;
     }
+}
+
+/* zhashx_set_destructor for mctx.queue_parents in test_virtual_queue () */
+static void wrap_free_test (void **item)
+{
+    if (item) {
+        free (*item);
+        (*item) = NULL;
+    }
+}
+
+/* RFC 33 virtual queues: a constraint naming a queue that has vqueues
+ * matches jobs in that queue or in any of its vqueues. A constraint
+ * naming a vqueue matches only that vqueue's own jobs.
+ */
+static void test_virtual_queue (void)
+{
+    struct job *job;
+    struct list_constraint *c;
+    flux_error_t error;
+    char *parent;
+
+    if (!(mctx.queue_parents = zhashx_new ()))
+        BAIL_OUT ("failed to create queue_parents hash");
+    zhashx_set_destructor (mctx.queue_parents, wrap_free_test);
+    if (!(parent = strdup ("batch")))
+        BAIL_OUT ("failed to strdup parent name");
+    if (zhashx_insert (mctx.queue_parents, "expedite", parent) < 0)
+        BAIL_OUT ("failed to insert into queue_parents hash");
+
+    c = create_list_constraint ("{ \"queue\": [ \"batch\" ] }");
+
+    job = setup_job (0,
+                     NULL,
+                     "batch",
+                     NULL,
+                     NULL,
+                     0,
+                     0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0);
+    ok (job_match (job, c, &error) == true,
+        "queue constraint on parent matches parent job");
+    job_destroy (job);
+
+    job = setup_job (0,
+                     NULL,
+                     "expedite",
+                     NULL,
+                     NULL,
+                     0,
+                     0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0);
+    ok (job_match (job, c, &error) == true,
+        "queue constraint on parent matches vqueue job");
+    job_destroy (job);
+
+    job = setup_job (0,
+                     NULL,
+                     "debug",
+                     NULL,
+                     NULL,
+                     0,
+                     0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0);
+    ok (job_match (job, c, &error) == false,
+        "queue constraint on parent does not match unrelated queue job");
+    job_destroy (job);
+
+    list_constraint_destroy (c);
+
+    c = create_list_constraint ("{ \"queue\": [ \"expedite\" ] }");
+
+    job = setup_job (0,
+                     NULL,
+                     "expedite",
+                     NULL,
+                     NULL,
+                     0,
+                     0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0);
+    ok (job_match (job, c, &error) == true,
+        "queue constraint on vqueue matches its own job");
+    job_destroy (job);
+
+    job = setup_job (0,
+                     NULL,
+                     "batch",
+                     NULL,
+                     NULL,
+                     0,
+                     0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0,
+                     0.0);
+    ok (job_match (job, c, &error) == false,
+        "queue constraint on vqueue does not match parent job");
+    job_destroy (job);
+
+    list_constraint_destroy (c);
+
+    zhashx_destroy (&mctx.queue_parents);
 }
 
 struct basic_states_test {
@@ -2153,6 +2283,7 @@ int main (int argc, char *argv[])
     test_basic_userid ();
     test_basic_name ();
     test_basic_queue ();
+    test_virtual_queue ();
     test_basic_states ();
     test_basic_results ();
     test_corner_case_hostlist ();
