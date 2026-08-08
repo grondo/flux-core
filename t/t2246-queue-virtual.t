@@ -114,7 +114,8 @@ test_expect_success 'invalid config: vqueue parent is not a string is rejected' 
 	[queues.expedite]
 	parent = 42
 	EOT
-	grep "parent. must be a string" parenttype.err
+	test_debug "cat parenttype.err" &&
+	grep -i "expected string.*got integer" parenttype.err
 '
 
 test_expect_success 'invalid vqueue config fails the instance at startup' '
