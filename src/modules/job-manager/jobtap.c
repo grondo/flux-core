@@ -1230,6 +1230,7 @@ int jobtap_call (struct jobtap *jobtap,
     json_t *R = NULL;
     flux_plugin_arg_t *args;
     int64_t priority = FLUX_JOBTAP_PRIORITY_UNAVAIL;
+    flux_error_t error;
     va_list ap;
 
     if (jobtap_topic_match_count (jobtap, topic) == 0)
@@ -1290,6 +1291,26 @@ int jobtap_call (struct jobtap *jobtap,
                       "jobtap: %s: %s: R is already set",
                       topic,
                       idf58 (job->id));
+            rc = -1;
+        }
+        else if (json_check_limits (R,
+                                    JSON_LIMIT_MAX_DEPTH,
+                                    0,
+                                    &error) < 0) {
+            /*  R is sent to the execution system and published to journal
+             *  consumers, so bound its depth.
+             *
+             *  No size limit is applied: R for a large or fragmented
+             *  allocation is legitimately big, and unlike the scheduler
+             *  and restart paths this one does not strip the scheduling
+             *  key, which holds a full resource graph.
+             */
+            flux_log (jobtap->ctx->h,
+                      LOG_ERR,
+                      "jobtap: %s: %s: R %s",
+                      topic,
+                      idf58 (job->id),
+                      error.text);
             rc = -1;
         }
         else
