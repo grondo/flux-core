@@ -89,6 +89,8 @@ libutil_la_SOURCES = \
 	grudgeset.h \
 	jpath.c \
 	jpath.h \
+	jsonlimit.c \
+	jsonlimit.h \
 	uri.c \
 	uri.h \
 	errprintf.c \
