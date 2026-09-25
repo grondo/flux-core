@@ -51,6 +51,14 @@
 #define EVENT_TOPIC_SIZE    64
 #define MAX_EVENT_NAME      (EVENT_TOPIC_SIZE - sizeof ("job.event."))
 
+/*  Maximum length of a dependency or prolog/epilog description.
+ *
+ *  A description is written to the job eventlog, and a dependency
+ *  description is also retained for the life of the job, so bound it
+ *  well above any reasonable use.
+ */
+#define MAX_DESCRIPTION     256
+
 #define FLUX_JOBTAP_PRIORITY_UNAVAIL INT64_C(-2)
 
 extern int priority_default_plugin_init (flux_plugin_t *p);
@@ -2012,6 +2020,23 @@ static struct job *lookup_job (struct job_manager *ctx, flux_jobid_t id)
     return job;
 }
 
+/*  Check a description supplied by a plugin for a dependency or
+ *  prolog/epilog event. The description is written to the job eventlog,
+ *  so it may not be empty and its length must be bounded.
+ */
+static int check_description (const char *description)
+{
+    size_t len;
+
+    if (!description
+        || (len = strlen (description)) == 0
+        || len > MAX_DESCRIPTION) {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
 static int jobtap_emit_dependency_event (struct jobtap *jobtap,
                                          struct job *job,
                                          bool add,
@@ -2020,6 +2045,8 @@ static int jobtap_emit_dependency_event (struct jobtap *jobtap,
     int flags = 0;
     const char *event = add ? "dependency-add" : "dependency-remove";
 
+    if (check_description (description) < 0)
+        return -1;
     if (job->state != FLUX_JOB_STATE_DEPEND
         && job->state != FLUX_JOB_STATE_NEW) {
         errno = EINVAL;
@@ -2572,10 +2599,8 @@ static int jobtap_emit_perilog_event (struct jobtap *jobtap,
     const char *event = prolog ? start ? "prolog-start" : "prolog-finish" :
                                  start ? "epilog-start" : "epilog-finish";
 
-    if (!description) {
-        errno = EINVAL;
+    if (check_description (description) < 0)
         return -1;
-    }
 
     /*  prolog events cannot be emitted after a start request is pending.
      *
