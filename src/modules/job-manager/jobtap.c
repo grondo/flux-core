@@ -30,6 +30,7 @@
 #include "src/common/libutil/basename.h"
 #include "src/common/libutil/errno_safe.h"
 #include "src/common/libutil/errprintf.h"
+#include "src/common/libutil/jsonlimit.h"
 #include "src/common/libutil/aux.h"
 #include "src/common/libjob/idf58.h"
 #include "ccan/str/str.h"
@@ -760,6 +761,19 @@ static int jobtap_topic_match_count (struct jobtap *jobtap,
         p = zlistx_next (jobtap->plugins);
     }
     return count;
+}
+
+static void log_update_rejected (struct jobtap *jobtap,
+                                 flux_plugin_t *p,
+                                 struct job *job,
+                                 flux_error_t *errp)
+{
+    flux_log (jobtap->ctx->h,
+              LOG_ERR,
+              "jobtap: %s: %s: rejecting jobspec update: %s",
+              jobtap_plugin_name (p),
+              idf58 (job->id),
+              errp->text);
 }
 
 static int jobtap_post_jobspec_updates (struct jobtap *jobtap,
@@ -2353,6 +2367,7 @@ int flux_jobtap_jobspec_update_id_pack (flux_plugin_t *p,
     struct jobtap *jobtap;
     struct job *job;
     json_error_t error;
+    flux_error_t errp;
     json_t *update = NULL;
 
     if (!p
@@ -2381,7 +2396,8 @@ int flux_jobtap_jobspec_update_id_pack (flux_plugin_t *p,
         errno = EINVAL;
         return -1;
     }
-    if (!validate_jobspec_updates (update)) {
+    if (!validate_jobspec_updates (update, &errp)) {
+        log_update_rejected (jobtap, p, job, &errp);
         errno = EINVAL;
         goto out;
     }
@@ -2407,6 +2423,7 @@ int flux_jobtap_jobspec_update_pack (flux_plugin_t *p, const char *fmt, ...)
     struct job * job;
     json_t *o = NULL;
     json_error_t error;
+    flux_error_t errp;
 
     if (!p
         || !(jobtap = flux_plugin_aux_get (p, "flux::jobtap"))
@@ -2424,16 +2441,25 @@ int flux_jobtap_jobspec_update_pack (flux_plugin_t *p, const char *fmt, ...)
         errno = EINVAL;
         return -1;
     }
-    if (!validate_jobspec_updates (o)) {
+    /*  Updates accumulate across calls until they are posted as a single
+     *  jobspec-update event, so validate the accumulated result rather
+     *  than this update alone. Note that the pending updates are merged
+     *  into 'o' rather than the other way around: 'o' is private to this
+     *  call, so a rejected update leaves the pending updates untouched,
+     *  and values from 'o' still take precedence.
+     */
+    if (jobtap->jobspec_update
+        && json_object_update_missing (o, jobtap->jobspec_update) < 0) {
+        errno = ENOMEM;
+        goto out;
+    }
+    if (!validate_jobspec_updates (o, &errp)) {
+        log_update_rejected (jobtap, p, job, &errp);
         errno = EINVAL;
         goto out;
     }
-    if (!jobtap->jobspec_update)
-        jobtap->jobspec_update = json_incref (o);
-    else if (json_object_update (jobtap->jobspec_update, o) < 0) {
-        errno = EINVAL;
-        goto out;
-    }
+    json_decref (jobtap->jobspec_update);
+    jobtap->jobspec_update = json_incref (o);
     rc = 0;
 out:
     saved_errno = errno;
@@ -2676,6 +2702,13 @@ int jobtap_job_update (struct jobtap *jobtap,
         if (require_feasibility != NULL)
             *require_feasibility = feasibility;
         if (additional_updates && updates) {
+            /*  Updates returned by a plugin here are posted in a
+             *  jobspec-update event just like those from
+             *  flux_jobtap_jobspec_update_pack(3), so they require the
+             *  same validation.
+             */
+            if (!validate_jobspec_updates (updates, errp))
+                return -1;
             if (*additional_updates == NULL)
                 *additional_updates = json_incref (updates);
             else if (json_object_update (*additional_updates, updates) < 0) {
