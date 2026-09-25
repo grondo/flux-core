@@ -32,6 +32,7 @@
 #include "src/common/libutil/errprintf.h"
 #include "src/common/libutil/jsonlimit.h"
 #include "src/common/libutil/aux.h"
+#include "src/common/libeventlog/eventlog.h"
 #include "src/common/libjob/idf58.h"
 #include "ccan/str/str.h"
 
@@ -42,6 +43,13 @@
 #include "raise.h"
 #include "jobtap.h"
 #include "jobtap-internal.h"
+
+/*  Size of the buffer used to build a "job.event.<name>" topic string in
+ *  jobtap_notify_subscribers(), and the resulting maximum length of an
+ *  event name posted by a plugin.
+ */
+#define EVENT_TOPIC_SIZE    64
+#define MAX_EVENT_NAME      (EVENT_TOPIC_SIZE - sizeof ("job.event."))
 
 #define FLUX_JOBTAP_PRIORITY_UNAVAIL INT64_C(-2)
 
@@ -1177,8 +1185,8 @@ int jobtap_notify_subscribers (struct jobtap *jobtap,
                                ...)
 {
     flux_plugin_arg_t *args;
-    char topic [64];
-    int topiclen = 64;
+    char topic [EVENT_TOPIC_SIZE];
+    int topiclen = EVENT_TOPIC_SIZE;
     va_list ap;
     int rc;
 
@@ -2350,17 +2358,37 @@ int flux_jobtap_event_post_pack (flux_plugin_t *p,
     va_list ap;
     struct jobtap *jobtap;
     struct job *job;
+    json_t *entry;
 
     if (!p || !name
         || !(jobtap = flux_plugin_aux_get (p, "flux::jobtap"))) {
         errno = EINVAL;
         return -1;
     }
+    /*  An event name is written to the job eventlog and is used to key an
+     *  internal hash of event names, so apply the same restrictions used
+     *  for an exception type, plus a length limit.
+     */
+    if (raise_check_type (name) < 0 || strlen (name) > MAX_EVENT_NAME) {
+        errno = EINVAL;
+        return -1;
+    }
     if (!(job = jobtap_lookup_active_jobid (p, id)))
         return -1;
+
+    /*  Build the entry here rather than posting directly so that the
+     *  plugin supplied context can be checked against the standard depth
+     *  and size limits before it is added to the eventlog.
+     */
     va_start (ap, fmt);
-    rc = event_job_post_vpack (jobtap->ctx->event, job, name, 0, fmt, ap);
+    entry = eventlog_entry_vpack (0., name, fmt, ap);
     va_end (ap);
+    if (!entry)
+        return -1;
+    rc = json_check_default_limits (json_object_get (entry, "context"), NULL);
+    if (rc == 0)
+        rc = event_job_post_entry (jobtap->ctx->event, job, 0, entry);
+    ERRNO_SAFE_WRAP (json_decref, entry);
     return rc;
 }
 
