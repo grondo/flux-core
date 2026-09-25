@@ -766,6 +766,7 @@ static int dependency_context_parse (flux_t *h,
                   "job %s: invalid dependency event: dependency-%s",
                   idf58 (job->id),
                   cmd);
+        errno = EPROTO;
         return -1;
     }
     return rc;
