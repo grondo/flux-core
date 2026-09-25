@@ -1047,6 +1047,13 @@ static int journal_process_event (struct job_state_ctx *jsctx,
     return 0;
 }
 
+/*  Process the events in one journal response.
+ *
+ *  Failure to decode or process an event is not fatal. It affects only the
+ *  job it describes, so skip and carry on rather than causing the job-list
+ *  module to exit with error. An internal error such as ENOMEM is still
+ *  fatal.
+ */
 static int journal_process_events (struct job_state_ctx *jsctx,
                                    const flux_msg_t *msg)
 {
@@ -1062,15 +1069,32 @@ static int journal_process_events (struct job_state_ctx *jsctx,
                         "id", &id,
                         "events", &events,
                         "jobspec", &jobspec,
-                        "R", &R) < 0)
-        return -1;
+                        "R", &R) < 0) {
+        if (errno != EPROTO && errno != EINVAL)
+            return -1;
+        /*  The payload could not be decoded, so the job it describes cannot
+         *  be identified. Log an error, but otherwise ignore.
+         */
+        flux_log_error (jsctx->h, "ignoring undecodable journal response");
+        return 0;
+    }
     if (!json_is_array (events)) {
-        errno = EPROTO;
-        return -1;
+        flux_log (jsctx->h,
+                  LOG_ERR,
+                  "job %s: ignoring journal response with invalid events",
+                  idf58 (id));
+        return 0;
     }
     json_array_foreach (events, index, value) {
-        if (journal_process_event (jsctx, id, value, jobspec, R) < 0)
-            return -1;
+        if (journal_process_event (jsctx, id, value, jobspec, R) < 0) {
+            if (errno != EPROTO && errno != EINVAL)
+                return -1;
+            flux_log (jsctx->h,
+                      LOG_ERR,
+                      "job %s: ignoring unusable event %zu",
+                      idf58 (id),
+                      index);
+        }
     }
 
     return 0;
