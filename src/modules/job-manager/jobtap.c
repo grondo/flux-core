@@ -2257,6 +2257,13 @@ int flux_jobtap_raise_exception (flux_plugin_t *p,
         errno = EINVAL;
         return -1;
     }
+    /*  Apply the same checks on exception type and severity that are
+     *  applied to an exception raised via the job-manager.raise RPC.
+     */
+    if (raise_check_type (type) < 0 || raise_check_severity (severity) < 0) {
+        errno = EINVAL;
+        return -1;
+    }
     if (!(job = jobtap_lookup_active_jobid (p, id)))
         return -1;
     va_start (ap, fmt);
