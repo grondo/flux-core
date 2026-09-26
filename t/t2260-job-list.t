@@ -2960,6 +2960,74 @@ EOF
 	cat superfluous_context.out | jq -e ".urgency == 8"
 '
 
+# An event that cannot be interpreted must not take down the module.  The
+# job is retained with the events that could be applied, and data that
+# could not be read is left unset.
+#
+# N.B. The urgency event below specifies an urgency out of range, so the
+# event cannot be applied.  The job must keep the urgency from the submit
+# event, and the events that follow must still be applied, so the job
+# reaches inactive state.
+test_expect_success 'job-list can handle an event that cannot be interpreted' '
+	userid=`id -u` &&
+	cat <<-EOF >eventlog_unusable_event.out &&
+	{"timestamp":1000.0,"name":"submit","context":{"userid":${userid},"urgency":8,"flags":0,"version":1}}
+	{"timestamp":1001.0,"name":"validate"}
+	{"timestamp":1002.0,"name":"depend"}
+	{"timestamp":1003.0,"name":"priority","context":{"priority":8}}
+	{"timestamp":1004.0,"name":"urgency","context":{"urgency":9999}}
+	{"timestamp":1005.0,"name":"alloc","context":{"annotations":{"sched":{"resource_summary":"rank0/core0"}}}}
+	{"timestamp":1006.0,"name":"start"}
+	{"timestamp":1007.0,"name":"finish","context":{"status":0}}
+	{"timestamp":1008.0,"name":"release","context":{"ranks":"all","final":true}}
+	{"timestamp":1009.0,"name":"free"}
+	{"timestamp":1010.0,"name":"clean"}
+	EOF
+	jobid=`flux submit --wait --urgency=default hostname` &&
+	kvspath=`flux job id --to=kvs ${jobid}` &&
+	flux kvs put -r ${kvspath}.eventlog=- < eventlog_unusable_event.out &&
+	restart_from_kvs &&
+	flux job list-ids ${jobid} > unusable_event.out &&
+	cat unusable_event.out | jq -e ".state == 64" &&
+	cat unusable_event.out | jq -e ".urgency == 8" &&
+	cat unusable_event.out | jq -e ".t_inactive == 1010.0"
+'
+
+# The module must remain loaded and in service after the unusable event.
+test_expect_success 'job-list still lists new jobs after an unusable event' '
+	flux module list | grep job-list &&
+	jobid=`flux submit --wait hostname | flux job id` &&
+	flux job list-ids --wait-state=inactive ${jobid} > after_unusable.out &&
+	cat after_unusable.out | jq -e ".id == ${jobid}"
+'
+
+# A memo event updates individual keys instead of replacing the memo, so a
+# memo event that sets a new key must not disturb keys set earlier.
+test_expect_success 'job-list merges memo events instead of replacing' '
+	userid=`id -u` &&
+	cat <<-EOF >eventlog_memo_merge.out &&
+	{"timestamp":1000.0,"name":"submit","context":{"userid":${userid},"urgency":8,"flags":0,"version":1}}
+	{"timestamp":1001.0,"name":"validate"}
+	{"timestamp":1002.0,"name":"depend"}
+	{"timestamp":1003.0,"name":"priority","context":{"priority":8}}
+	{"timestamp":1004.0,"name":"memo","context":{"uri":"foo"}}
+	{"timestamp":1005.0,"name":"memo","context":{"fairshare":0.5}}
+	{"timestamp":1006.0,"name":"alloc"}
+	{"timestamp":1007.0,"name":"start"}
+	{"timestamp":1008.0,"name":"finish","context":{"status":0}}
+	{"timestamp":1009.0,"name":"release","context":{"ranks":"all","final":true}}
+	{"timestamp":1010.0,"name":"free"}
+	{"timestamp":1011.0,"name":"clean"}
+	EOF
+	jobid=`flux submit --wait --urgency=default hostname` &&
+	kvspath=`flux job id --to=kvs ${jobid}` &&
+	flux kvs put -r ${kvspath}.eventlog=- < eventlog_memo_merge.out &&
+	restart_from_kvs &&
+	flux job list-ids ${jobid} > memo_merge.out &&
+	cat memo_merge.out | jq -e ".annotations.user.uri == \"foo\"" &&
+	cat memo_merge.out | jq -e ".annotations.user.fairshare == 0.5"
+'
+
 # invalid job data tests
 #
 # to avoid potential racyness, wait up to 5 seconds for job to appear
