@@ -43,6 +43,16 @@ class ResourceSetImplementation(ABC):  # pragma: no cover
         raise NotImplementedError
 
     @abstractmethod
+    def set_property(self, name, ranks=None):
+        """Set property 'name' on 'ranks' (or all ranks if None)"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def remove_property(self, name, ranks=None):
+        """Remove property 'name' from 'ranks' (or all ranks if None)"""
+        raise NotImplementedError
+
+    @abstractmethod
     def nnodes(self):
         """Return the number of nodes in the resource set as an IDset"""
         raise NotImplementedError

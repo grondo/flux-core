@@ -435,6 +435,16 @@ class Rv1Pool(Rv1Set, ResourcePoolImplementation):
                 prop_ranks.discard(rank)
         self._bump()
 
+    def set_property(self, name: str, ranks=None) -> None:
+        """Set property *name* on *ranks* (or all ranks if ``None``)."""
+        super().set_property(name, ranks)
+        self._bump()
+
+    def remove_property(self, name: str, ranks=None) -> None:
+        """Remove property *name* from *ranks* (or all ranks if ``None``)."""
+        super().remove_property(name, ranks)
+        self._bump()
+
     # ------------------------------------------------------------------
     # ResourcePoolImplementation — job lifecycle
     # ------------------------------------------------------------------

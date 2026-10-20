@@ -179,6 +179,16 @@ class ResourceSet:
         self.impl.set_property(name, ranks)
         return self
 
+    def remove_property(self, name, ranks=None):
+        """
+        Remove property 'name' from optional 'ranks' (all ranks if ranks
+        is None)
+        """
+        if ranks is None:
+            ranks = str(self.ranks)
+        self.impl.remove_property(name, ranks)
+        return self
+
     def get_properties(self):
         """
         Return an RFC 20 properties object for this ResourceSet

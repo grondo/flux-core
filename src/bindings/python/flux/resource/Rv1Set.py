@@ -391,6 +391,40 @@ class Rv1Set(ResourceSetImplementation):
         self._properties[name] |= target
         return self
 
+    def remove_property(self, name: str, ranks=None) -> "Rv1Set":
+        """Remove property *name* from *ranks* (or all ranks if ``None``).
+
+        Validated as in :meth:`set_property`, so an invalid property name
+        or a rank not in the set is an error and nothing is removed.
+        Removing a property that a rank does not have, or one that is not
+        present at all, is not an error.  A property left with no ranks is
+        dropped entirely.
+        """
+        if "^" in name:
+            raise ValueError(
+                f"invalid property name {name!r}: '^' is reserved for constraint negation"
+            )
+        if not name:
+            raise ValueError("property name must not be empty")
+
+        if ranks is None:
+            target = set(self._ranks.keys())
+        else:
+            try:
+                ids = IDset(str(ranks))
+            except Exception as exc:
+                raise ValueError(f"invalid rank idset {ranks!r}: {exc}") from exc
+            target = set(ids)
+            invalid = target - set(self._ranks.keys())
+            if invalid:
+                raise ValueError(f"ranks {_idset_str(invalid)} not in resource set")
+
+        if name in self._properties:
+            self._properties[name] -= target
+            if not self._properties[name]:
+                del self._properties[name]
+        return self
+
     def get_properties(self) -> str:
         """Return an RFC 20 properties JSON object string."""
         result = {

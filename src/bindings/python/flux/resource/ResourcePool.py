@@ -166,6 +166,14 @@ class ResourcePool:
         """Remove ranks from the pool (called on shrink events)."""
         self.impl.remove_ranks(ranks)
 
+    def set_property(self, name: str, ranks=None) -> None:
+        """Set property *name* on *ranks* (or all ranks if ``None``)."""
+        self.impl.set_property(name, ranks)
+
+    def remove_property(self, name: str, ranks=None) -> None:
+        """Remove property *name* from *ranks* (or all ranks if ``None``)."""
+        self.impl.remove_property(name, ranks)
+
     @property
     def expiration(self) -> float:
         """Resource expiration timestamp (seconds since epoch, 0 = none)."""
