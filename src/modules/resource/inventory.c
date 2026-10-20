@@ -1077,6 +1077,265 @@ error:
         flux_log_error (h, "error responding to expiration-update request");
 }
 
+/* Resolve the targets of each property in 'properties' from an idset
+ * string or an RFC 29 hostlist to an idset string, returning a new object
+ * suitable for queue_membership_update() and for the scheduler.
+ *
+ * The job-manager knows a queue's hosts rather than its ranks, and this
+ * module owns R, so the resolution happens here. Returns NULL on error
+ * with 'errp' set. Caller must json_decref() the result.
+ */
+static json_t *resolve_targets (struct inventory *inv,
+                                json_t *properties,
+                                flux_error_t *errp)
+{
+    json_t *out;
+    const char *name;
+    json_t *val;
+
+    if (!properties)
+        return NULL;
+    if (!json_is_object (properties)) {
+        errprintf (errp, "properties must be an object");
+        errno = EINVAL;
+        return NULL;
+    }
+    if (!(out = json_object ())) {
+        errprintf (errp, "out of memory");
+        errno = ENOMEM;
+        return NULL;
+    }
+    json_object_foreach (properties, name, val) {
+        const char *targets;
+        struct idset *ids;
+        char *s;
+        int rc;
+
+        /* Only instance-local properties (RFC 20 '+' prefix) may be set at
+         * runtime. A property without the prefix describes the hardware,
+         * is configured in [resource.config], and propagates into a job's
+         * R and its subinstances. It also has no authority to restore it
+         * after a module reload, so a runtime one would silently vanish.
+         */
+        if (name[0] != '+') {
+            errprintf (errp,
+                       "property %s: only instance-local properties "
+                       "(prefixed with '+') may be set at runtime",
+                       name);
+            errno = EINVAL;
+            goto error;
+        }
+        if (!(targets = json_string_value (val))) {
+            errprintf (errp, "property %s: targets must be a string", name);
+            errno = EINVAL;
+            goto error;
+        }
+        if (!(ids = inventory_targets_to_ranks (inv, targets, errp)))
+            goto error;
+        if (!(s = idset_encode (ids, IDSET_FLAG_RANGE))) {
+            errprintf (errp, "property %s: idset_encode failed", name);
+            idset_destroy (ids);
+            goto error;
+        }
+        idset_destroy (ids);
+        rc = json_object_set_new (out, name, json_string (s));
+        free (s);
+        if (rc < 0) {
+            errprintf (errp, "out of memory");
+            errno = ENOMEM;
+            goto error;
+        }
+    }
+    return out;
+error:
+    ERRNO_SAFE_WRAP (json_decref, out);
+    return NULL;
+}
+
+/* Context for a resource.property-update request awaiting the scheduler's
+ * response to sched.property-update.
+ */
+struct property_update {
+    struct inventory *inv;
+    const flux_msg_t *msg;      // the request, answered when complete
+    json_t *R;                  // trial R with the update already applied
+};
+
+static void property_update_destroy (struct property_update *pu)
+{
+    if (pu) {
+        int saved_errno = errno;
+        flux_msg_decref (pu->msg);
+        json_decref (pu->R);
+        free (pu);
+        errno = saved_errno;
+    }
+}
+
+/* Commit a validated update: swap the trial R in as the R this module
+ * serves, and post an event so the change is visible in the journal. The
+ * request is answered when that post completes.
+ *
+ * N.B. there is deliberately no KVS commit here, unlike the other two
+ * inventory_put_R() callers. Only 'R' changes; 'R_stored' is the R as
+ * received and is already correct. A runtime property must not be stored,
+ * because it would be replayed on a reload that reads R back from the KVS
+ * and would reintroduce membership that a configuration change had
+ * removed. See the comment in inventory_put(). The event is posted with
+ * EVENT_NO_COMMIT for the same reason: visible in the journal like
+ * online/offline, but never persisted and never replayed. The job-manager
+ * is the authority for runtime membership and re-pushes it after a reload.
+ */
+static int property_update_commit (struct property_update *pu)
+{
+    struct inventory *inv = pu->inv;
+
+    json_decref (inv->R);
+    inv->R = json_incref (pu->R);
+
+    if (reslog_post_pack (inv->ctx->reslog,
+                          pu->msg,
+                          0.,
+                          "property-update",
+                          EVENT_NO_COMMIT,
+                          "{}") < 0) {
+        flux_log_error (inv->ctx->h, "error posting property-update event");
+        return -1;
+    }
+    return 0;
+}
+
+static void property_update_continuation (flux_future_t *f, void *arg)
+{
+    struct property_update *pu = arg;
+    flux_t *h = pu->inv->ctx->h;
+
+    /* The scheduler's response is the confirmation that it applied the
+     * update. An error here -- including ENOSYS from a scheduler that does
+     * not implement the request -- fails the operation outright, so that
+     * nothing is applied anywhere.
+     */
+    if (flux_future_get (f, NULL) < 0) {
+        if (flux_respond_error (h,
+                                pu->msg,
+                                errno,
+                                future_strerror (f, errno)) < 0)
+            flux_log_error (h, "error responding to property-update request");
+        goto done;
+    }
+    if (property_update_commit (pu) < 0) {
+        if (flux_respond_error (h, pu->msg, errno, NULL) < 0)
+            flux_log_error (h, "error responding to property-update request");
+    }
+done:
+    flux_future_destroy (f);
+    property_update_destroy (pu);
+}
+
+static void resource_property_update (flux_t *h,
+                                      flux_msg_handler_t *mh,
+                                      const flux_msg_t *msg,
+                                      void *arg)
+{
+    struct inventory *inv = arg;
+    json_t *add = NULL;
+    json_t *remove = NULL;
+    json_t *add_ranks = NULL;
+    json_t *remove_ranks = NULL;
+    json_t *payload = NULL;
+    struct property_update *pu = NULL;
+    flux_future_t *f = NULL;
+    flux_error_t error;
+    const char *errstr = NULL;
+
+    if (inv->ctx->rank != 0) {
+        errno = ENOSYS;
+        errstr = "resource.property-update is only available on rank 0";
+        goto error;
+    }
+    if (flux_request_unpack (msg,
+                             NULL,
+                             "{s?o s?o}",
+                             "property-add", &add,
+                             "property-remove", &remove) < 0)
+        goto error;
+    if (!inv->R) {
+        errno = ENOENT;
+        errstr = "R is not yet available";
+        goto error;
+    }
+    if (!(pu = calloc (1, sizeof (*pu))))
+        goto error;
+    pu->inv = inv;
+    pu->msg = flux_msg_incref (msg);
+
+    /* Validate everything before the scheduler is told anything, so that
+     * applying the update cannot fail after the scheduler has confirmed
+     * it. Hostlists are resolved to ranks here, and the update is applied
+     * to a copy of R: if any part of it fails, the R this module serves is
+     * untouched and the request simply fails.
+     */
+    if ((add && !(add_ranks = resolve_targets (inv, add, &error)))
+        || (remove && !(remove_ranks = resolve_targets (inv, remove, &error)))) {
+        errstr = error.text;
+        goto error;
+    }
+    if (!(pu->R = queue_membership_copy (inv->R)))
+        goto error;
+    if (queue_membership_update (pu->R, add_ranks, remove_ranks, &error) < 0) {
+        errstr = error.text;
+        goto error;
+    }
+
+    /* With no acquire client there is no scheduler to tell, and that is
+     * success rather than failure: there is nothing to desynchronize from,
+     * and the next resource.acquire serves the updated R. Were this an
+     * error, a runtime queue operation would fail whenever the scheduler
+     * happened to be reloading.
+     */
+    if (acquire_clients (inv->ctx->acquire) == 0) {
+        if (property_update_commit (pu) < 0)
+            goto error;
+        goto done;
+    }
+    /* Both keys are optional per RFC 28, so only send the ones present.
+     * N.B. json_pack() "s?O" fails on a NULL value rather than omitting
+     * the key, so the payload is built up explicitly here.
+     */
+    if (!(payload = json_object ())
+        || (add_ranks
+            && json_object_set (payload, "property-add", add_ranks) < 0)
+        || (remove_ranks
+            && json_object_set (payload, "property-remove", remove_ranks) < 0)) {
+        errno = ENOMEM;
+        goto error;
+    }
+    if (!(f = flux_rpc_pack (h,
+                             "sched.property-update",
+                             FLUX_NODEID_ANY,
+                             0,
+                             "O",
+                             payload))
+        || flux_future_then (f, -1., property_update_continuation, pu) < 0) {
+        errstr = "error sending sched.property-update request";
+        goto error;
+    }
+    pu = NULL; // owned by the continuation now
+done:
+    json_decref (add_ranks);
+    json_decref (remove_ranks);
+    json_decref (payload);
+    return;
+error:
+    if (flux_respond_error (h, msg, errno, errstr) < 0)
+        flux_log_error (h, "error responding to property-update request");
+    flux_future_destroy (f);
+    property_update_destroy (pu);
+    json_decref (add_ranks);
+    json_decref (remove_ranks);
+    json_decref (payload);
+}
+
 static const struct flux_msg_handler_spec htab[] = {
     {
         FLUX_MSGTYPE_REQUEST,
@@ -1094,6 +1353,12 @@ static const struct flux_msg_handler_spec htab[] = {
         FLUX_MSGTYPE_REQUEST,
         "resource.expiration-update",
         resource_expiration_update,
+        0
+    },
+    {
+        FLUX_MSGTYPE_REQUEST,
+        "resource.property-update",
+        resource_property_update,
         0
     },
     FLUX_MSGHANDLER_TABLE_END,
