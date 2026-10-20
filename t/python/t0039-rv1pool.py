@@ -947,6 +947,88 @@ class TestRv1PoolConstraints(unittest.TestCase):
             self.assertIn(rank, {2, 3})
 
 
+class TestRv1PoolSetRemoveProperty(unittest.TestCase):
+    """Runtime property add/remove, as driven by sched.property-update."""
+
+    def setUp(self):
+        self.pool = Rv1Pool(R_4x4)
+
+    def properties(self):
+        return json.loads(self.pool.get_properties())
+
+    def test_set_property(self):
+        self.pool.set_property("+batch", "0-1")
+        self.assertEqual(self.properties(), {"+batch": "0-1"})
+
+    def test_set_property_all_ranks(self):
+        self.pool.set_property("+batch")
+        self.assertEqual(self.properties(), {"+batch": "0-3"})
+
+    def test_remove_property(self):
+        self.pool.set_property("+batch", "0-3")
+        self.pool.remove_property("+batch", "0-1")
+        self.assertEqual(self.properties(), {"+batch": "2-3"})
+
+    def test_remove_last_rank_drops_property(self):
+        self.pool.set_property("+batch", "0-1")
+        self.pool.remove_property("+batch", "0-1")
+        self.assertEqual(self.properties(), {})
+
+    def test_remove_absent_property_is_not_an_error(self):
+        self.pool.set_property("+batch", "0-1")
+        self.pool.remove_property("+batch", "2-3")
+        self.pool.remove_property("+nosuch", "0-3")
+        self.assertEqual(self.properties(), {"+batch": "0-1"})
+
+    def test_move_ranks_between_properties(self):
+        # Starting a runtime queue over a donor queue: remove then add.
+        self.pool.set_property("+batch", "0-3")
+        self.pool.remove_property("+batch", "2-3")
+        self.pool.set_property("+debug", "2-3")
+        self.assertEqual(self.properties(), {"+batch": "0-1", "+debug": "2-3"})
+
+    def test_invalid_rank(self):
+        with self.assertRaises(ValueError):
+            self.pool.set_property("+batch", "0-9")
+        with self.assertRaises(ValueError):
+            self.pool.remove_property("+batch", "0-9")
+
+    def test_invalid_name(self):
+        with self.assertRaises(ValueError):
+            self.pool.set_property("ba^tch", "0-1")
+        with self.assertRaises(ValueError):
+            self.pool.remove_property("ba^tch", "0-1")
+
+    def test_generation_bumped(self):
+        gen = self.pool.generation
+        self.pool.set_property("+batch", "0-1")
+        self.assertGreater(self.pool.generation, gen)
+        gen = self.pool.generation
+        self.pool.remove_property("+batch", "0-1")
+        self.assertGreater(self.pool.generation, gen)
+
+    def test_constraint_follows_property(self):
+        # A property added at runtime constrains a subsequent allocation,
+        # which is the whole point of sched.property-update.
+        self.pool.set_property("+batch", "0-1")
+        a = self.pool.alloc(1, rr(0, 2, 1, constraint={"properties": ["+batch"]}))
+        for rank in a._ranks:
+            self.assertIn(rank, {0, 1})
+
+    def test_constraint_infeasible_after_remove(self):
+        self.pool.set_property("+batch", "0-1")
+        self.pool.remove_property("+batch", "0-1")
+        with self.assertRaises(InfeasibleRequest):
+            self.pool.alloc(1, rr(0, 1, 1, constraint={"properties": ["+batch"]}))
+
+    def test_remove_ranks_discards_property(self):
+        from flux.idset import IDset
+
+        self.pool.set_property("+batch", "0-3")
+        self.pool.remove_ranks(IDset("2-3"))
+        self.assertEqual(self.properties(), {"+batch": "0-1"})
+
+
 class TestRv1PoolRemoveRanks(unittest.TestCase):
     def test_remove_reduces_count(self):
         from flux.idset import IDset
