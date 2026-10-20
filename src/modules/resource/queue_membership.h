@@ -57,6 +57,41 @@ int queue_membership_apply (json_t *R,
                             const flux_conf_t *conf,
                             flux_error_t *errp);
 
+/* Apply the properties in 'add' and 'remove' to resource object 'R', in
+ * place. Either may be NULL. Both are RFC 20 properties objects mapping a
+ * property name to the idset of execution targets it applies to:
+ *
+ *   { "+batch": "0-1", "+debug": "2-3" }
+ *
+ * Values must be idset strings; a caller holding a hostlist resolves it
+ * first (see inventory_targets_to_ranks()).
+ *
+ * Unlike queue_membership_apply(), the properties do not come from the
+ * configuration. This is the path for a queue created at runtime, whose
+ * membership the job-manager pushes rather than this module deriving it.
+ *
+ * Both objects are applied as a single update: 'remove' first, so that
+ * moving ranks between two queues in one call works regardless of the
+ * order of the two objects. If any property fails to apply, 'R' is left
+ * unmodified.
+ *
+ * A property name is validated as in rlist_add_property(), and every
+ * target rank must be present in 'R'. Removing a property that a rank does
+ * not have is not an error. Removing the last property removes
+ * execution.properties entirely.
+ *
+ * The result is derived state, exactly as for queue_membership_apply():
+ * it belongs in the R this module serves, not the R committed to the KVS.
+ * Runtime membership is not persisted here -- the job-manager is its
+ * authority and re-pushes it after a reload.
+ *
+ * Returns 0 on success, or -1 on error with 'errp' set.
+ */
+int queue_membership_update (json_t *R,
+                             json_t *add,
+                             json_t *remove,
+                             flux_error_t *errp);
+
 /* Return a copy of 'R' that queue_membership_apply() may modify without
  * affecting the original. Only execution.properties is duplicated; the
  * rest of R is shared, so the caller must not modify the result's other
