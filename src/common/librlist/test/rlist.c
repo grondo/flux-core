@@ -1504,6 +1504,95 @@ void test_properties (void)
 
 }
 
+/*  Return the property object of 'rl' encoded as a string, for comparison
+ *   with json_compare(). Caller must free.
+ */
+static char *properties_get (struct rlist *rl)
+{
+    char *s;
+    if (!(s = rlist_properties_encode (rl)))
+        BAIL_OUT ("rlist_properties_encode failed");
+    return s;
+}
+
+static void test_add_remove_property (void)
+{
+    struct rlist *rl;
+    flux_error_t error;
+    char *s;
+
+    if (!(rl = rlist_create ()))
+        BAIL_OUT ("rlist_create failed");
+    for (int i = 0; i < 4; i++) {
+        char host[16];
+        (void) snprintf (host, sizeof (host), "foo%d", i);
+        if (rlist_append_rank_cores (rl, host, i, "0-3") < 0)
+            BAIL_OUT ("rlist_append_rank_cores failed");
+    }
+
+    ok (rlist_add_property (rl, &error, "+batch", "0-1") == 0,
+        "rlist_add_property (+batch, 0-1) works");
+    s = properties_get (rl);
+    json_compare (s, "{\"+batch\": \"0-1\"}",
+                  "property was added to the expected ranks");
+    free (s);
+
+    /*  Removal is validated like addition: an invalid property name or a
+     *   rank not in the list is an error, and nothing is removed.
+     */
+    ok (rlist_remove_property (rl, &error, "fo^o", "0-1") < 0
+        && errno == EINVAL,
+        "rlist_remove_property with invalid name fails with EINVAL");
+    is (error.text, "Invalid character '^' in property \"fo^o\"",
+        "error.text is expected: %s", error.text);
+
+    ok (rlist_remove_property (rl, &error, "+batch", "0-9") < 0
+        && errno == ENOENT,
+        "rlist_remove_property with unknown rank fails with ENOENT");
+    is (error.text, "ranks 4-9 not found in target resource list",
+        "error.text is expected: %s", error.text);
+
+    ok (rlist_remove_property (rl, &error, "+batch", "x-y") < 0
+        && errno == EINVAL,
+        "rlist_remove_property with invalid idset fails with EINVAL");
+
+    s = properties_get (rl);
+    json_compare (s, "{\"+batch\": \"0-1\"}",
+                  "no property was removed by the failed calls above");
+    free (s);
+
+    /*  Removing a property a rank does not have is not an error.
+     */
+    ok (rlist_remove_property (rl, &error, "+batch", "2-3") == 0,
+        "rlist_remove_property of a property rank does not have works");
+    s = properties_get (rl);
+    json_compare (s, "{\"+batch\": \"0-1\"}",
+                  "and the property is unchanged");
+    free (s);
+
+    ok (rlist_remove_property (rl, &error, "nosuch", "0-3") == 0,
+        "rlist_remove_property of a nonexistent property works");
+
+    ok (rlist_remove_property (rl, &error, "+batch", "0") == 0,
+        "rlist_remove_property (+batch, 0) works");
+    s = properties_get (rl);
+    json_compare (s, "{\"+batch\": \"1\"}",
+                  "property was removed from only the specified rank");
+    free (s);
+
+    /*  Removing the last rank drops the property entirely, since
+     *   rlist_properties_encode() omits a property with no ranks.
+     */
+    ok (rlist_remove_property (rl, &error, "+batch", "1") == 0,
+        "rlist_remove_property (+batch, 1) works");
+    s = properties_get (rl);
+    is (s, "{}",
+        "removing the last rank drops the property");
+    free (s);
+
+    rlist_destroy (rl);
+}
+
 static void test_rlist_config_inval (void)
 {
     flux_error_t error;
@@ -1590,6 +1679,7 @@ int main (int ac, char *av[])
     test_rerank ();
     test_hosts_to_ranks ();
     test_properties ();
+    test_add_remove_property ();
     test_rlist_config_inval ();
     test_issue_5868 ();
     done_testing ();
