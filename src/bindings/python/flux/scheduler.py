@@ -1006,6 +1006,68 @@ class Scheduler(BrokerModule):
                 self.handle.handle, msg.handle, errno.EINVAL, str(exc).encode()
             )
 
+    @request_handler("sched.property-update", prefix=False)
+    def _handle_property_update(self, msg):
+        """Apply an RFC 28 property update to the allocation resource set.
+
+        The resource module sends this before applying an instance-local
+        property change (e.g. queue membership) to its own copy of R, and
+        fails the operation if this response is an error.  The response
+        therefore means "applied", so it must not be sent before the
+        update is visible to allocation.
+        """
+        from flux.idset import IDset
+
+        try:
+            payload = msg.payload or {}
+            add = payload.get("property-add") or {}
+            remove = payload.get("property-remove") or {}
+            if not isinstance(add, Mapping) or not isinstance(remove, Mapping):
+                raise ValueError("property-add and property-remove must be objects")
+
+            # Validate both objects before mutating either, so a bad entry
+            # in property-add cannot leave property-remove half applied.
+            valid = set(self._resources.impl.ranks())
+            for name, ranks in list(add.items()) + list(remove.items()):
+                if not name:
+                    raise ValueError("property name must not be empty")
+                if "^" in name:
+                    raise ValueError(
+                        f"invalid property name {name!r}: '^' is reserved for "
+                        "constraint negation"
+                    )
+                if not isinstance(ranks, str):
+                    raise ValueError(f"property {name}: targets must be a string")
+                try:
+                    ids = IDset(ranks)
+                except Exception as exc:
+                    raise ValueError(
+                        f"property {name}: invalid idset {ranks!r}: {exc}"
+                    ) from exc
+                invalid = set(ids) - valid
+                if invalid:
+                    raise ValueError(
+                        f"property {name}: ranks "
+                        f"{IDset(','.join(str(r) for r in sorted(invalid)))} "
+                        "not in resource set"
+                    )
+
+            # Remove first, so moving ranks from one queue to another in a
+            # single update works regardless of the order of the two keys.
+            for name, ranks in remove.items():
+                self._resources.remove_property(name, ranks)
+            for name, ranks in add.items():
+                self._resources.set_property(name, ranks)
+
+            self.resource_update()
+            self._request_schedule()
+            self.handle.respond(msg, None)
+        except Exception as exc:
+            self.log.error(f"property-update failed: {exc}")
+            lib.flux_respond_error(
+                self.handle.handle, msg.handle, errno.EINVAL, str(exc).encode()
+            )
+
     @request_handler("feasibility.check", prefix=False)
     def _handle_feasibility(self, msg):
         try:
