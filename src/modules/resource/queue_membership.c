@@ -8,13 +8,18 @@
  * SPDX-License-Identifier: LGPL-3.0
 \************************************************************/
 
-/* queue_membership.c - apply static queue membership properties to R
+/* queue_membership.c - apply queue membership properties to R
  *
  * A configured queue that declares 'hosts' (RFC 33) has its membership
  * property "+NAME" (an RFC 20 instance-local property) applied to the
  * corresponding ranks of the resource object R at module load time. See
  * queue_membership.h for why these are derived here rather than obtained
  * from the job-manager, the authority for queue configuration.
+ *
+ * queue_membership_update() applies properties that do not come from the
+ * configuration, for a queue created at runtime. It is the same splice of
+ * execution.properties, driven by explicit property objects rather than by
+ * [queues], so the two share the rlist handling below.
  */
 
 #if HAVE_CONFIG_H
@@ -122,6 +127,59 @@ nomem:
     return NULL;
 }
 
+/* Build an rlist from 'R' so hosts can be resolved to ranks and properties
+ * applied to it. Returns NULL on error with 'errp' set.
+ */
+static struct rlist *R_to_rlist (json_t *R, flux_error_t *errp)
+{
+    struct rlist *rl;
+
+    if (!(rl = rlist_from_json (R, NULL))) {
+        errprintf (errp, "queue membership: error parsing R");
+        errno = EINVAL;
+        return NULL;
+    }
+    return rl;
+}
+
+/* Splice the properties of decorated rlist 'rl' back into 'R', in place.
+ *
+ * rlist_to_R() emits the full R; only execution.properties is taken, so R's
+ * other fields (scheduling, etc.) are preserved. The key is removed when no
+ * property remains, so an R whose last property was removed looks the same
+ * as one that never had any.
+ *
+ * Called only after every property has been applied successfully, so a
+ * failure partway through leaves R untouched.
+ */
+static int splice_properties (json_t *R, struct rlist *rl, flux_error_t *errp)
+{
+    json_t *newR;
+    json_t *newprop;
+    int rc = -1;
+
+    if (!(newR = rlist_to_R (rl))) {
+        errprintf (errp, "queue membership: rlist_to_R: %s", strerror (errno));
+        return -1;
+    }
+    if (!(newprop = jpath_get (newR, "execution.properties"))
+        || json_object_size (newprop) == 0) {
+        if (jpath_del (R, "execution.properties") < 0) {
+            errprintf (errp, "queue membership: error clearing R properties");
+            goto done;
+        }
+    }
+    else if (jpath_set (R, "execution.properties", newprop) < 0) {
+        errprintf (errp, "queue membership: error updating R properties");
+        errno = ENOMEM;
+        goto done;
+    }
+    rc = 0;
+done:
+    json_decref (newR);
+    return rc;
+}
+
 int queue_membership_apply (json_t *R,
                             const flux_conf_t *conf,
                             flux_error_t *errp)
@@ -130,8 +188,6 @@ int queue_membership_apply (json_t *R,
     const char *name;
     json_t *entry;
     struct rlist *rl = NULL;
-    json_t *newR = NULL;
-    json_t *newprop;
     int rc = -1;
 
     if (flux_conf_unpack (conf, NULL, "{s?o}", "queues", &queues) < 0)
@@ -142,14 +198,8 @@ int queue_membership_apply (json_t *R,
     if (!queue_membership_configured (queues))
         return 0;
 
-    /* Build an rlist from R so hosts can be resolved to ranks and the derived
-     * membership properties applied, then encoded back into R.
-     */
-    if (!(rl = rlist_from_json (R, NULL))) {
-        errprintf (errp, "queue membership: error parsing R");
-        errno = EINVAL;
+    if (!(rl = R_to_rlist (R, errp)))
         goto done;
-    }
     json_object_foreach (queues, name, entry) {
         const char *hosts;
         char *ranks;
@@ -170,24 +220,71 @@ int queue_membership_apply (json_t *R,
         }
         free (ranks);
     }
-    /* Splice the updated properties from the decorated rlist back into R.
-     * rlist_to_R() emits the full R; take only execution.properties so R's
-     * other fields (scheduling, etc.) are preserved.
-     */
-    if (!(newR = rlist_to_R (rl))) {
-        errprintf (errp, "queue membership: rlist_to_R: %s", strerror (errno));
+    if (splice_properties (R, rl, errp) < 0)
         goto done;
-    }
-    /* At least one property was applied above, so the key is present. */
-    if (!(newprop = jpath_get (newR, "execution.properties"))
-        || jpath_set (R, "execution.properties", newprop) < 0) {
-        errprintf (errp, "queue membership: error updating R properties");
-        errno = ENOMEM;
-        goto done;
-    }
     rc = 0;
 done:
-    json_decref (newR);
+    rlist_destroy (rl);
+    return rc;
+}
+
+/* Apply each property of 'properties' to 'rl' with 'fun', which is either
+ * rlist_add_property() or rlist_remove_property(). Values must be idset
+ * strings; the caller resolves any hostlist beforehand.
+ */
+static int apply_properties (struct rlist *rl,
+                             json_t *properties,
+                             int (*fun)(struct rlist *,
+                                        flux_error_t *,
+                                        const char *,
+                                        const char *),
+                             flux_error_t *errp)
+{
+    const char *name;
+    json_t *val;
+
+    if (!properties)
+        return 0;
+    if (!json_is_object (properties)) {
+        errprintf (errp, "properties must be an object");
+        errno = EINVAL;
+        return -1;
+    }
+    json_object_foreach (properties, name, val) {
+        const char *targets;
+
+        if (!(targets = json_string_value (val))) {
+            errprintf (errp, "property %s: targets must be a string", name);
+            errno = EINVAL;
+            return -1;
+        }
+        if (fun (rl, errp, name, targets) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+int queue_membership_update (json_t *R,
+                             json_t *add,
+                             json_t *remove,
+                             flux_error_t *errp)
+{
+    struct rlist *rl;
+    int rc = -1;
+
+    if (!(rl = R_to_rlist (R, errp)))
+        return -1;
+    /* Remove before add so that moving a rank between two queues in one
+     * update -- remove "+A", add "+B" -- cannot be ordered such that the
+     * add is undone by the remove.
+     */
+    if (apply_properties (rl, remove, rlist_remove_property, errp) < 0
+        || apply_properties (rl, add, rlist_add_property, errp) < 0)
+        goto done;
+    if (splice_properties (R, rl, errp) < 0)
+        goto done;
+    rc = 0;
+done:
     rlist_destroy (rl);
     return rc;
 }
