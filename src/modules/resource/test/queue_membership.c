@@ -486,6 +486,198 @@ static void test_bad_R (void)
     json_decref (R);
 }
 
+/* queue_membership_update() applies explicit property objects rather than
+ * deriving from [queues]. This is the runtime path, where the job-manager
+ * pushes membership that is not in the configuration.
+ */
+static void update_ok (json_t *R,
+                       const char *add,
+                       const char *remove,
+                       const char *msg)
+{
+    flux_error_t error;
+    json_t *a = NULL;
+    json_t *r = NULL;
+    char *freeme;
+
+    if ((add && !(a = json_loads (add, 0, NULL)))
+        || (remove && !(r = json_loads (remove, 0, NULL))))
+        BAIL_OUT ("could not parse test properties");
+    ok (queue_membership_update (R, a, r, &error) == 0, "%s", msg);
+    diag ("R properties: %s", R_properties_str (R, &freeme));
+    free (freeme);
+    json_decref (a);
+    json_decref (r);
+}
+
+static void test_update (void)
+{
+    json_t *R = test_R ();
+
+    update_ok (R, "{\"+batch\": \"0-1\"}", NULL, "update with add works");
+    check_property (R, "+batch", "0-1", "+batch covers the given ranks");
+
+    update_ok (R, "{\"+debug\": \"2-3\"}", NULL, "a second add works");
+    check_property (R, "+batch", "0-1", "+batch is unchanged");
+    check_property (R, "+debug", "2-3", "+debug is applied alongside");
+
+    update_ok (R, NULL, "{\"+debug\": \"2-3\"}", "update with remove works");
+    check_property (R, "+debug", NULL, "+debug is removed");
+    check_property (R, "+batch", "0-1", "+batch survives the remove");
+
+    update_ok (R, NULL, NULL, "update with neither add nor remove works");
+    check_property (R, "+batch", "0-1", "R is unchanged");
+
+    json_decref (R);
+}
+
+/* Both objects are applied as a single update, so moving ranks from one
+ * queue to another in one call works. This is what starting a runtime
+ * queue over a donor queue does.
+ */
+static void test_update_both (void)
+{
+    json_t *R = test_R ();
+
+    update_ok (R, "{\"+batch\": \"0-3\"}", NULL, "add +batch to every rank");
+    update_ok (R,
+               "{\"+debug\": \"2-3\"}",
+               "{\"+batch\": \"2-3\"}",
+               "update with both add and remove works");
+    check_property (R, "+batch", "0-1", "+batch keeps only the donor ranks");
+    check_property (R, "+debug", "2-3", "+debug covers the moved ranks");
+
+    json_decref (R);
+}
+
+/* Removing the last property removes execution.properties entirely, so an
+ * R whose runtime queues are all gone looks like one that never had any.
+ */
+static void test_update_all_removed (void)
+{
+    json_t *R = test_R ();
+
+    update_ok (R, "{\"+batch\": \"0-1\"}", NULL, "add works");
+    update_ok (R, NULL, "{\"+batch\": \"0-1\"}", "remove of the last works");
+    ok (jpath_get (R, "execution.properties") == NULL,
+        "execution.properties is absent after the last property is removed");
+
+    json_decref (R);
+}
+
+/* Removing a property a rank does not have, or one that does not exist at
+ * all, is not an error.
+ */
+static void test_update_remove_absent (void)
+{
+    json_t *R = test_R ();
+
+    update_ok (R, "{\"+batch\": \"0-1\"}", NULL, "add works");
+    update_ok (R, NULL, "{\"+batch\": \"2-3\"}",
+               "remove from ranks without the property works");
+    check_property (R, "+batch", "0-1", "+batch is unchanged");
+    update_ok (R, NULL, "{\"+nosuch\": \"0-3\"}",
+               "remove of a nonexistent property works");
+    check_property (R, "+batch", "0-1", "+batch is still unchanged");
+
+    json_decref (R);
+}
+
+/* Properties R already carries are untouched by an update that does not
+ * name them.
+ */
+static void test_update_existing_kept (void)
+{
+    json_t *R = test_R ();
+
+    R_set_property (R, "gpu", "0-1");
+    update_ok (R, "{\"+batch\": \"0-1\"}", NULL, "update over existing works");
+    check_property (R, "gpu", "0-1", "an ordinary property is kept");
+    check_property (R, "+batch", "0-1", "+batch is applied alongside");
+
+    json_decref (R);
+}
+
+/* A failure anywhere in the update leaves R completely unmodified: the
+ * resource module relies on this to validate before telling the scheduler.
+ */
+static void test_update_bad (void)
+{
+    json_t *R = test_R ();
+    flux_error_t error;
+    json_t *o;
+
+    update_ok (R, "{\"+batch\": \"0-1\"}", NULL, "add works");
+
+    if (!(o = json_loads ("{\"+debug\": \"0-9\"}", 0, NULL)))
+        BAIL_OUT ("json_loads failed");
+    ok (queue_membership_update (R, o, NULL, &error) < 0 && errno == ENOENT,
+        "update with an unknown rank fails with ENOENT");
+    diag ("error: %s", error.text);
+    check_property (R, "+debug", NULL, "the bad property was not applied");
+    check_property (R, "+batch", "0-1", "R is otherwise unmodified");
+    json_decref (o);
+
+    if (!(o = json_loads ("{\"de^bug\": \"0-1\"}", 0, NULL)))
+        BAIL_OUT ("json_loads failed");
+    ok (queue_membership_update (R, o, NULL, &error) < 0 && errno == EINVAL,
+        "update with an invalid property name fails with EINVAL");
+    diag ("error: %s", error.text);
+    json_decref (o);
+
+    if (!(o = json_loads ("{\"+debug\": 1}", 0, NULL)))
+        BAIL_OUT ("json_loads failed");
+    ok (queue_membership_update (R, o, NULL, &error) < 0 && errno == EINVAL,
+        "update with a non-string target fails with EINVAL");
+    diag ("error: %s", error.text);
+    json_decref (o);
+
+    if (!(o = json_loads ("[\"+debug\"]", 0, NULL)))
+        BAIL_OUT ("json_loads failed");
+    ok (queue_membership_update (R, o, NULL, &error) < 0 && errno == EINVAL,
+        "update with a non-object fails with EINVAL");
+    diag ("error: %s", error.text);
+    json_decref (o);
+
+    /* A failure in 'add' must not leave 'remove' applied, since remove is
+     * applied first.
+     */
+    if (!(o = json_loads ("{\"+nosuchrank\": \"9\"}", 0, NULL)))
+        BAIL_OUT ("json_loads failed");
+    {
+        json_t *rm = json_loads ("{\"+batch\": \"0-1\"}", 0, NULL);
+        if (!rm)
+            BAIL_OUT ("json_loads failed");
+        ok (queue_membership_update (R, o, rm, &error) < 0,
+            "update fails when add fails after a successful remove");
+        diag ("error: %s", error.text);
+        check_property (R, "+batch", "0-1",
+                        "the remove was not applied either");
+        json_decref (rm);
+    }
+    json_decref (o);
+
+    json_decref (R);
+}
+
+/* Malformed R is an error, not a crash.
+ */
+static void test_update_bad_R (void)
+{
+    json_t *R = json_object ();
+    flux_error_t error;
+    json_t *o = NULL;
+
+    if (!R || !(o = json_loads ("{\"+batch\": \"0\"}", 0, NULL)))
+        BAIL_OUT ("could not create test inputs");
+    ok (queue_membership_update (R, o, NULL, &error) < 0 && errno == EINVAL,
+        "update with malformed R fails with EINVAL");
+    diag ("error: %s", error.text);
+
+    json_decref (o);
+    json_decref (R);
+}
+
 int main (int argc, char *argv[])
 {
     plan (NO_PLAN);
@@ -504,6 +696,13 @@ int main (int argc, char *argv[])
     test_copy_no_properties ();
     test_R_preserved ();
     test_bad_R ();
+    test_update ();
+    test_update_both ();
+    test_update_all_removed ();
+    test_update_remove_absent ();
+    test_update_existing_kept ();
+    test_update_bad ();
+    test_update_bad_R ();
 
     done_testing ();
 }
