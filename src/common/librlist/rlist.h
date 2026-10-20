@@ -245,6 +245,18 @@ int rlist_add_property (struct rlist *rl,
                         const char *name,
                         const char *targets);
 
+/*  Remove a single property 'name' from ranks in 'targets'.
+ *
+ *  'name' and 'targets' are validated as in rlist_add_property(), so an
+ *  invalid property name or a rank not present in 'rl' is an error and
+ *  nothing is removed. Removing a property that a rank does not have is
+ *  not an error.
+ */
+int rlist_remove_property (struct rlist *rl,
+                           flux_error_t *errp,
+                           const char *name,
+                           const char *targets);
+
 /*  Assign properties to targets
  */
 int rlist_assign_properties (struct rlist *rl,

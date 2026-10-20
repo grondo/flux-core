@@ -1063,17 +1063,20 @@ static const char * property_string_invalid (const char *s)
     return strpbrk (s, "^&'\"`|()");
 }
 
-int rlist_add_property (struct rlist *rl,
-                        flux_error_t *errp,
-                        const char *name,
-                        const char *targets)
+/*  Validate property 'name' and decode 'targets', ensuring every target
+ *   rank exists in 'rl'.  Ranks are checked up front so that a caller can
+ *   fail before modifying any property.  Returns the decoded idset, which
+ *   the caller must destroy, or NULL on error with errp set.
+ */
+static struct idset *property_targets_decode (struct rlist *rl,
+                                              flux_error_t *errp,
+                                              const char *name,
+                                              const char *targets)
 {
     unsigned int i;
     int count;
-    struct rnode *n;
     struct idset *ids = NULL;
     struct idset *unknown = NULL;
-    int rc = -1;
     char *p;
     const char *invalid;
 
@@ -1083,7 +1086,7 @@ int rlist_add_property (struct rlist *rl,
                    *invalid,
                    name);
         errno = EINVAL;
-        goto out;
+        goto error;
     }
 
     if (!targets || !(ids = idset_decode (targets))) {
@@ -1091,15 +1094,12 @@ int rlist_add_property (struct rlist *rl,
                    "Invalid idset string '%s'",
                    targets ? targets : "(null)");
         errno = EINVAL;
-        goto out;
+        goto error;
     }
 
-    /*  Check for invalid ranks first, so we can fail early before
-     *   applying any properties.
-     */
     if (!(unknown = idset_create (0, IDSET_FLAG_AUTOGROW))) {
         errprintf (errp, "Out of memory");
-        goto out;
+        goto error;
     }
     i = idset_first (ids);
     while (i != IDSET_INVALID_ID) {
@@ -1107,7 +1107,7 @@ int rlist_add_property (struct rlist *rl,
             && idset_set (unknown, i) < 0) {
             errprintf (errp, "unknown rank %u", i);
             errno = ENOENT;
-            goto out;
+            goto error;
         }
         i = idset_next (ids, i);
     }
@@ -1119,8 +1119,28 @@ int rlist_add_property (struct rlist *rl,
                    p ? p : "");
         free (p);
         errno = ENOENT;
-        goto out;
+        goto error;
     }
+    idset_destroy (unknown);
+    return ids;
+error:
+    idset_destroy (ids);
+    idset_destroy (unknown);
+    return NULL;
+}
+
+int rlist_add_property (struct rlist *rl,
+                        flux_error_t *errp,
+                        const char *name,
+                        const char *targets)
+{
+    unsigned int i;
+    struct rnode *n;
+    struct idset *ids;
+    int rc = -1;
+
+    if (!(ids = property_targets_decode (rl, errp, name, targets)))
+        return -1;
 
     i = idset_first (ids);
     while (i != IDSET_INVALID_ID) {
@@ -1137,8 +1157,32 @@ int rlist_add_property (struct rlist *rl,
     rc = 0;
 out:
     idset_destroy (ids);
-    idset_destroy (unknown);
     return rc;
+}
+
+int rlist_remove_property (struct rlist *rl,
+                           flux_error_t *errp,
+                           const char *name,
+                           const char *targets)
+{
+    unsigned int i;
+    struct rnode *n;
+    struct idset *ids;
+
+    if (!(ids = property_targets_decode (rl, errp, name, targets)))
+        return -1;
+
+    /*  N.B. removing a property a rank does not have is not an error,
+     *   so this loop cannot fail once the targets are validated above.
+     */
+    i = idset_first (ids);
+    while (i != IDSET_INVALID_ID) {
+        if ((n = rlist_find_rank (rl, i)))
+            rnode_remove_property (n, name);
+        i = idset_next (ids, i);
+    }
+    idset_destroy (ids);
+    return 0;
 }
 
 int rlist_assign_properties (struct rlist *rl,
