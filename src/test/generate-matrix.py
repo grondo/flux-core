@@ -162,10 +162,8 @@ class BuildMatrix:
         # docker container, prevent this
         env["PSM3_HAL"] = "loopback"
 
-        needs_buildx = False
         if platform:
             command_args += f"--platform={platform}"
-            needs_buildx = True
 
         # The command to run:
         command = f"{docker_run_checks} -j{jobs} --image={image} {command_args}"
@@ -199,7 +197,6 @@ class BuildMatrix:
                 "coverage": coverage,
                 "coverage_flags": coverage_flags,
                 "docker_tag": docker_tag,
-                "needs_buildx": needs_buildx,
                 "create_release": create_release,
                 "timeout_minutes": timeout_minutes,
             }
