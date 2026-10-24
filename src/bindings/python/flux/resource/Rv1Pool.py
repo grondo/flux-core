@@ -445,6 +445,11 @@ class Rv1Pool(Rv1Set, ResourcePoolImplementation):
         super().remove_property(name, ranks)
         self._bump()
 
+    def update_properties(self, add=None, remove=None) -> None:
+        """Apply *add* and *remove* property objects as a single update."""
+        super().update_properties(add, remove)
+        self._bump()
+
     # ------------------------------------------------------------------
     # ResourcePoolImplementation — job lifecycle
     # ------------------------------------------------------------------

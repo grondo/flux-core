@@ -365,30 +365,66 @@ class Rv1Set(ResourceSetImplementation):
                 prop_ranks.discard(rank)
         return self
 
-    def set_property(self, name: str, ranks=None) -> "Rv1Set":
-        """Set property *name* on *ranks* (or all ranks if *ranks* is ``None``)."""
+    def validate_property(self, name: str, ranks=None) -> Set[int]:
+        """Validate a property name and target ranks, returning the targets.
+
+        Raises :class:`ValueError` if *name* is empty or contains the
+        reserved ``^``, if *ranks* is not a valid idset, or if it names a
+        rank not in this set.  *ranks* of ``None`` means all ranks.
+
+        Exposed so that a caller applying several properties as one update
+        can validate them all before mutating any.
+        """
+        if not name:
+            raise ValueError("property name must not be empty")
         if "^" in name:
             raise ValueError(
                 f"invalid property name {name!r}: '^' is reserved for constraint negation"
             )
-        if not name:
-            raise ValueError("property name must not be empty")
 
         if ranks is None:
-            target = set(self._ranks.keys())
-        else:
-            try:
-                ids = IDset(str(ranks))
-            except Exception as exc:
-                raise ValueError(f"invalid rank idset {ranks!r}: {exc}") from exc
-            target = set(ids)
-            invalid = target - set(self._ranks.keys())
-            if invalid:
-                raise ValueError(f"ranks {_idset_str(invalid)} not in resource set")
+            return set(self._ranks.keys())
+        try:
+            ids = IDset(str(ranks))
+        except Exception as exc:
+            raise ValueError(f"invalid rank idset {ranks!r}: {exc}") from exc
+        target = set(ids)
+        invalid = target - set(self._ranks.keys())
+        if invalid:
+            raise ValueError(f"ranks {_idset_str(invalid)} not in resource set")
+        return target
 
+    def set_property(self, name: str, ranks=None) -> "Rv1Set":
+        """Set property *name* on *ranks* (or all ranks if *ranks* is ``None``)."""
+        target = self.validate_property(name, ranks)
         if name not in self._properties:
             self._properties[name] = set()
         self._properties[name] |= target
+        return self
+
+    def update_properties(self, add=None, remove=None) -> "Rv1Set":
+        """Apply *add* and *remove* property objects as a single update.
+
+        Each maps a property name to the ranks it applies to.  Removals
+        are applied first, so moving ranks from one property to another
+        in one call works regardless of the order of the two objects.
+
+        The update is atomic: if any part of it fails, the property set is
+        left exactly as it was.
+        """
+        saved = {name: set(ranks) for name, ranks in self._properties.items()}
+        name = None
+        try:
+            for name, ranks in (remove or {}).items():
+                self.remove_property(name, ranks)
+            for name, ranks in (add or {}).items():
+                self.set_property(name, ranks)
+        except ValueError as exc:
+            self._properties = saved
+            raise ValueError(f"property {name}: {exc}") from exc
+        except Exception:
+            self._properties = saved
+            raise
         return self
 
     def remove_property(self, name: str, ranks=None) -> "Rv1Set":
@@ -400,25 +436,7 @@ class Rv1Set(ResourceSetImplementation):
         present at all, is not an error.  A property left with no ranks is
         dropped entirely.
         """
-        if "^" in name:
-            raise ValueError(
-                f"invalid property name {name!r}: '^' is reserved for constraint negation"
-            )
-        if not name:
-            raise ValueError("property name must not be empty")
-
-        if ranks is None:
-            target = set(self._ranks.keys())
-        else:
-            try:
-                ids = IDset(str(ranks))
-            except Exception as exc:
-                raise ValueError(f"invalid rank idset {ranks!r}: {exc}") from exc
-            target = set(ids)
-            invalid = target - set(self._ranks.keys())
-            if invalid:
-                raise ValueError(f"ranks {_idset_str(invalid)} not in resource set")
-
+        target = self.validate_property(name, ranks)
         if name in self._properties:
             self._properties[name] -= target
             if not self._properties[name]:

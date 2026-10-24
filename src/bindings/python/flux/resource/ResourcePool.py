@@ -174,6 +174,10 @@ class ResourcePool:
         """Remove property *name* from *ranks* (or all ranks if ``None``)."""
         self.impl.remove_property(name, ranks)
 
+    def update_properties(self, add=None, remove=None) -> None:
+        """Apply *add* and *remove* property objects as a single update."""
+        self.impl.update_properties(add, remove)
+
     @property
     def expiration(self) -> float:
         """Resource expiration timestamp (seconds since epoch, 0 = none)."""
