@@ -1082,10 +1082,13 @@ error:
  * suitable for queue_membership_update() and for the scheduler.
  *
  * The job-manager knows a queue's hosts rather than its ranks, and this
- * module owns R, so the resolution happens here. Returns NULL on error
- * with 'errp' set. Caller must json_decref() the result.
+ * module owns R, so the resolution happens here. 'rl' is R parsed once by
+ * the caller: a hostlist is the expected form, so resolving each property
+ * with inventory_targets_to_ranks() instead would rebuild the rlist per
+ * property. Returns NULL on error with 'errp' set. Caller must
+ * json_decref() the result.
  */
-static json_t *resolve_targets (struct inventory *inv,
+static json_t *resolve_targets (struct rlist *rl,
                                 json_t *properties,
                                 flux_error_t *errp)
 {
@@ -1108,7 +1111,6 @@ static json_t *resolve_targets (struct inventory *inv,
     json_object_foreach (properties, name, val) {
         const char *targets;
         struct idset *ids;
-        char *s;
         int rc;
 
         /* Only instance-local properties (RFC 20 '+' prefix) may be set at
@@ -1130,19 +1132,21 @@ static json_t *resolve_targets (struct inventory *inv,
             errno = EINVAL;
             goto error;
         }
-        if (!(ids = inventory_targets_to_ranks (inv, targets, errp)))
-            goto error;
-        if (!(s = idset_encode (ids, IDSET_FLAG_RANGE))) {
-            errprintf (errp, "property %s: idset_encode failed", name);
-            idset_destroy (ids);
-            goto error;
+        if (!(ids = idset_decode (targets))) {
+            flux_error_t err;
+            if (!(ids = rlist_hosts_to_ranks (rl, targets, &err))) {
+                errprintf (errp,
+                           "property %s: invalid targets: %s",
+                           name,
+                           err.text);
+                errno = EINVAL;
+                goto error;
+            }
         }
+        rc = rutil_set_json_idset (out, name, ids);
         idset_destroy (ids);
-        rc = json_object_set_new (out, name, json_string (s));
-        free (s);
         if (rc < 0) {
-            errprintf (errp, "out of memory");
-            errno = ENOMEM;
+            errprintf (errp, "property %s: %s", name, strerror (errno));
             goto error;
         }
     }
@@ -1186,15 +1190,15 @@ static void property_update_destroy (struct property_update *pu)
  * online/offline, but never persisted and never replayed. The job-manager
  * is the authority for runtime membership and re-pushes it after a reload.
  */
-static int property_update_commit (struct property_update *pu)
+static int property_update_commit (struct inventory *inv,
+                                   const flux_msg_t *msg,
+                                   json_t *R)
 {
-    struct inventory *inv = pu->inv;
-
     json_decref (inv->R);
-    inv->R = json_incref (pu->R);
+    inv->R = json_incref (R);
 
     if (reslog_post_pack (inv->ctx->reslog,
-                          pu->msg,
+                          msg,
                           0.,
                           "property-update",
                           EVENT_NO_COMMIT,
@@ -1223,7 +1227,7 @@ static void property_update_continuation (flux_future_t *f, void *arg)
             flux_log_error (h, "error responding to property-update request");
         goto done;
     }
-    if (property_update_commit (pu) < 0) {
+    if (property_update_commit (pu->inv, pu->msg, pu->R) < 0) {
         if (flux_respond_error (h, pu->msg, errno, NULL) < 0)
             flux_log_error (h, "error responding to property-update request");
     }
@@ -1242,7 +1246,8 @@ static void resource_property_update (flux_t *h,
     json_t *remove = NULL;
     json_t *add_ranks = NULL;
     json_t *remove_ranks = NULL;
-    json_t *payload = NULL;
+    json_t *newR = NULL;
+    struct rlist *rl = NULL;
     struct property_update *pu = NULL;
     flux_future_t *f = NULL;
     flux_error_t error;
@@ -1264,10 +1269,6 @@ static void resource_property_update (flux_t *h,
         errstr = "R is not yet available";
         goto error;
     }
-    if (!(pu = calloc (1, sizeof (*pu))))
-        goto error;
-    pu->inv = inv;
-    pu->msg = flux_msg_incref (msg);
 
     /* Validate everything before the scheduler is told anything, so that
      * applying the update cannot fail after the scheduler has confirmed
@@ -1275,14 +1276,19 @@ static void resource_property_update (flux_t *h,
      * to a copy of R: if any part of it fails, the R this module serves is
      * untouched and the request simply fails.
      */
-    if ((add && !(add_ranks = resolve_targets (inv, add, &error)))
-        || (remove && !(remove_ranks = resolve_targets (inv, remove, &error)))) {
+    if (!(rl = rlist_from_json (inv->R, NULL))) {
+        errno = EINVAL;
+        errstr = "error parsing R";
+        goto error;
+    }
+    if ((add && !(add_ranks = resolve_targets (rl, add, &error)))
+        || (remove && !(remove_ranks = resolve_targets (rl, remove, &error)))) {
         errstr = error.text;
         goto error;
     }
-    if (!(pu->R = queue_membership_copy (inv->R)))
+    if (!(newR = queue_membership_copy (inv->R)))
         goto error;
-    if (queue_membership_update (pu->R, add_ranks, remove_ranks, &error) < 0) {
+    if (queue_membership_update (newR, add_ranks, remove_ranks, &error) < 0) {
         errstr = error.text;
         goto error;
     }
@@ -1294,28 +1300,26 @@ static void resource_property_update (flux_t *h,
      * happened to be reloading.
      */
     if (acquire_clients (inv->ctx->acquire) == 0) {
-        if (property_update_commit (pu) < 0)
+        if (property_update_commit (inv, msg, newR) < 0)
             goto error;
         goto done;
     }
-    /* Both keys are optional per RFC 28, so only send the ones present.
-     * N.B. json_pack() "s?O" fails on a NULL value rather than omitting
-     * the key, so the payload is built up explicitly here.
+    /* Otherwise hold the request and the trial R until the scheduler
+     * confirms. Both keys are optional per RFC 28, so "O*" omits the one
+     * that is NULL rather than failing as "s?O" would.
      */
-    if (!(payload = json_object ())
-        || (add_ranks
-            && json_object_set (payload, "property-add", add_ranks) < 0)
-        || (remove_ranks
-            && json_object_set (payload, "property-remove", remove_ranks) < 0)) {
-        errno = ENOMEM;
+    if (!(pu = calloc (1, sizeof (*pu))))
         goto error;
-    }
+    pu->inv = inv;
+    pu->msg = flux_msg_incref (msg);
+    pu->R = json_incref (newR);
     if (!(f = flux_rpc_pack (h,
                              "sched.property-update",
                              FLUX_NODEID_ANY,
                              0,
-                             "O",
-                             payload))
+                             "{s:O* s:O*}",
+                             "property-add", add_ranks,
+                             "property-remove", remove_ranks))
         || flux_future_then (f, -1., property_update_continuation, pu) < 0) {
         errstr = "error sending sched.property-update request";
         goto error;
@@ -1324,16 +1328,15 @@ static void resource_property_update (flux_t *h,
 done:
     json_decref (add_ranks);
     json_decref (remove_ranks);
-    json_decref (payload);
+    json_decref (newR);
+    rlist_destroy (rl);
     return;
 error:
     if (flux_respond_error (h, msg, errno, errstr) < 0)
         flux_log_error (h, "error responding to property-update request");
     flux_future_destroy (f);
     property_update_destroy (pu);
-    json_decref (add_ranks);
-    json_decref (remove_ranks);
-    json_decref (payload);
+    goto done;
 }
 
 static const struct flux_msg_handler_spec htab[] = {

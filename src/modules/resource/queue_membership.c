@@ -144,26 +144,36 @@ static struct rlist *R_to_rlist (json_t *R, flux_error_t *errp)
 
 /* Splice the properties of decorated rlist 'rl' back into 'R', in place.
  *
- * rlist_to_R() emits the full R; only execution.properties is taken, so R's
- * other fields (scheduling, etc.) are preserved. The key is removed when no
- * property remains, so an R whose last property was removed looks the same
- * as one that never had any.
+ * Only execution.properties is replaced, so R's other fields (scheduling,
+ * etc.) are preserved. The key is removed when no property remains, so an R
+ * whose last property was removed looks the same as one that never had any.
+ *
+ * N.B. rlist_properties_encode() is used rather than rlist_to_R() because
+ * it walks only the property hash. rlist_to_R() would sort and compress
+ * every node and build a nodelist, all of it discarded here, and this runs
+ * on the module load path via queue_membership_apply().
  *
  * Called only after every property has been applied successfully, so a
  * failure partway through leaves R untouched.
  */
 static int splice_properties (json_t *R, struct rlist *rl, flux_error_t *errp)
 {
-    json_t *newR;
-    json_t *newprop;
+    char *s;
+    json_t *newprop = NULL;
     int rc = -1;
 
-    if (!(newR = rlist_to_R (rl))) {
-        errprintf (errp, "queue membership: rlist_to_R: %s", strerror (errno));
+    if (!(s = rlist_properties_encode (rl))) {
+        errprintf (errp,
+                   "queue membership: rlist_properties_encode: %s",
+                   strerror (errno));
         return -1;
     }
-    if (!(newprop = jpath_get (newR, "execution.properties"))
-        || json_object_size (newprop) == 0) {
+    if (!(newprop = json_loads (s, 0, NULL))) {
+        errprintf (errp, "queue membership: error decoding R properties");
+        errno = ENOMEM;
+        goto done;
+    }
+    if (json_object_size (newprop) == 0) {
         if (jpath_del (R, "execution.properties") < 0) {
             errprintf (errp, "queue membership: error clearing R properties");
             goto done;
@@ -176,7 +186,8 @@ static int splice_properties (json_t *R, struct rlist *rl, flux_error_t *errp)
     }
     rc = 0;
 done:
-    json_decref (newR);
+    json_decref (newprop);
+    free (s);
     return rc;
 }
 
