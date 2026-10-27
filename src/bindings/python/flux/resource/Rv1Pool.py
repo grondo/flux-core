@@ -43,6 +43,7 @@ import time
 from collections.abc import Mapping
 from typing import Dict, List, Tuple
 
+from flux.constraint.requires import requires
 from flux.idset import IDset
 from flux.job import JobID
 from flux.resource.ResourcePoolImplementation import (
@@ -298,6 +299,11 @@ class Rv1Pool(Rv1Set, ResourcePoolImplementation):
         # _job_state: jobid -> (end_time, alloc) for all tracked jobs.
         self._job_state: Dict[int, Tuple[float, "Rv1Pool"]] = {}
 
+        # _exclusive: the exclusive property set (E).  A rank holding one
+        # of these properties may only be allocated to a job that requires
+        # it.  See alloc().
+        self._exclusive: set = set()
+
     # ------------------------------------------------------------------
     # Rv1Set override: _copy_from_ranks must add pool-specific fields
     # ------------------------------------------------------------------
@@ -351,6 +357,10 @@ class Rv1Pool(Rv1Set, ResourcePoolImplementation):
         if log is not None:
             new.log = log
         new.generation = generation
+        # The exclusive property set is pool state like _properties, so it
+        # is carried here rather than in _init_from_state(), which exists
+        # for subclasses and is not required to chain to super().
+        new._exclusive = set(getattr(source, "_exclusive", ()))
         # Allow subclasses to initialize their attributes from source
         if source is not None:
             new._init_from_state(source)
@@ -449,6 +459,28 @@ class Rv1Pool(Rv1Set, ResourcePoolImplementation):
         """Apply *add* and *remove* property objects as a single update."""
         super().update_properties(add, remove)
         self._bump()
+
+    def update_exclusive(self, add=(), remove=()) -> None:
+        """Add and remove names in the exclusive property set (E).
+
+        A rank that has a property in E may only be allocated to a job
+        whose constraint requires that property.  Feasibility is not
+        affected: a job that cannot use those ranks waits rather than
+        being rejected.
+        """
+        for name in list(add) + list(remove):
+            if not isinstance(name, str):
+                raise ValueError("exclusive property names must be strings")
+        self._exclusive = (self._exclusive | set(add)) - set(remove)
+        self._bump()
+
+    def get_exclusive(self) -> set:
+        """Return a copy of the exclusive property set (E)."""
+        return set(self._exclusive)
+
+    def _rank_exclusive(self, rank: int) -> set:
+        """Return the properties in E that *rank* has."""
+        return {p for p in self._exclusive if rank in self._properties.get(p, ())}
 
     # ------------------------------------------------------------------
     # ResourcePoolImplementation — job lifecycle
@@ -655,6 +687,19 @@ class Rv1Pool(Rv1Set, ResourcePoolImplementation):
                 (r, i, fc, fg)
                 for r, i, fc, fg in candidates
                 if self._matches_constraint(r, i, constraint)
+            ]
+
+        # A rank holding an exclusive property is set aside for jobs that
+        # require it, much as a drained rank is set aside.  This is applied
+        # at allocation only: _check_feasibility() ignores E, so an excluded
+        # job raises InsufficientResources and waits rather than being
+        # rejected as unsatisfiable.
+        if self._exclusive:
+            optin = requires(constraint)
+            candidates = [
+                (r, i, fc, fg)
+                for r, i, fc, fg in candidates
+                if self._rank_exclusive(r) <= optin
             ]
 
         candidates = self._sort_candidates(candidates)

@@ -178,6 +178,14 @@ class ResourcePool:
         """Apply *add* and *remove* property objects as a single update."""
         self.impl.update_properties(add, remove)
 
+    def update_exclusive(self, add=(), remove=()) -> None:
+        """Add and remove names in the exclusive property set (E)."""
+        self.impl.update_exclusive(add, remove)
+
+    def get_exclusive(self) -> set:
+        """Return the exclusive property set (E)."""
+        return self.impl.get_exclusive()
+
     @property
     def expiration(self) -> float:
         """Resource expiration timestamp (seconds since epoch, 0 = none)."""
