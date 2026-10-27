@@ -58,6 +58,11 @@ struct idset *inventory_targets_to_ranks (struct inventory *inv,
  */
 int inventory_get_size (struct inventory *inv);
 
+/* Get the exclusive property set (E) as a sorted JSON array of names.
+ * Returned object shall not be modified or freed by the caller.
+ */
+json_t *inventory_get_exclusive (struct inventory *inv);
+
 #endif /* !_FLUX_RESOURCE_INVENTORY_H */
 
 

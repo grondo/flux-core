@@ -114,6 +114,11 @@ struct inventory {
                                     * Always a distinct object from 'R'.
                                     * See inventory_put().
                                     */
+    json_t *exclusive;             /* E: sorted array of exclusive property
+                                    * names.  Not part of R, and never
+                                    * stored in the KVS.  See
+                                    * resource_property_update().
+                                    */
     char *method;
     double saved_expiration;       /* expiration for use with rediscover */
 
@@ -1156,6 +1161,103 @@ error:
     return NULL;
 }
 
+/* Check that 'names' is an array of RFC 20 instance-local property names.
+ */
+static int check_exclusive_names (json_t *names,
+                                  const char *key,
+                                  flux_error_t *errp)
+{
+    size_t index;
+    json_t *val;
+
+    if (!json_is_array (names)) {
+        errprintf (errp, "%s must be an array", key);
+        errno = EINVAL;
+        return -1;
+    }
+    json_array_foreach (names, index, val) {
+        const char *name = json_string_value (val);
+        if (!name || name[0] != '+') {
+            errprintf (errp,
+                       "%s: only instance-local properties (prefixed with"
+                       " '+') may be exclusive",
+                       key);
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static bool exclusive_name_member (json_t *names, const char *name)
+{
+    size_t index;
+    json_t *val;
+
+    json_array_foreach (names, index, val) {
+        if (streq (json_string_value (val), name))
+            return true;
+    }
+    return false;
+}
+
+/* Insert 'val' into the sorted array 'out', if not already present.
+ */
+static int exclusive_name_insert (json_t *out, json_t *val)
+{
+    const char *name = json_string_value (val);
+    size_t index;
+    json_t *entry;
+
+    json_array_foreach (out, index, entry) {
+        int cmp = strcmp (name, json_string_value (entry));
+        if (cmp == 0)
+            return 0;
+        if (cmp < 0)
+            return json_array_insert (out, index, val);
+    }
+    return json_array_append (out, val);
+}
+
+/* Compute (E + add) - remove as a new sorted, deduplicated array.
+ */
+static json_t *exclusive_update (json_t *E,
+                                 json_t *add,
+                                 json_t *remove,
+                                 flux_error_t *errp)
+{
+    json_t *out;
+    json_t *src[2] = { E, add };
+    size_t index;
+    json_t *val;
+
+    if (!(out = json_array ())) {
+        errprintf (errp, "out of memory");
+        errno = ENOMEM;
+        return NULL;
+    }
+    for (int i = 0; i < 2; i++) {
+        json_array_foreach (src[i], index, val) {
+            if (remove && exclusive_name_member (remove, json_string_value (val)))
+                continue;
+            if (exclusive_name_insert (out, val) < 0) {
+                errprintf (errp, "out of memory");
+                errno = ENOMEM;
+                goto error;
+            }
+        }
+    }
+    return out;
+error:
+    ERRNO_SAFE_WRAP (json_decref, out);
+    return NULL;
+}
+
+json_t *inventory_get_exclusive (struct inventory *inv)
+{
+    return inv->exclusive;
+}
+
 /* Context for a resource.property-update request awaiting the scheduler's
  * response to sched.property-update.
  */
@@ -1163,6 +1265,7 @@ struct property_update {
     struct inventory *inv;
     const flux_msg_t *msg;      // the request, answered when complete
     json_t *R;                  // trial R with the update already applied
+    json_t *exclusive;          // trial E with the update already applied
 };
 
 static void property_update_destroy (struct property_update *pu)
@@ -1171,6 +1274,7 @@ static void property_update_destroy (struct property_update *pu)
         int saved_errno = errno;
         flux_msg_decref (pu->msg);
         json_decref (pu->R);
+        json_decref (pu->exclusive);
         free (pu);
         errno = saved_errno;
     }
@@ -1192,10 +1296,13 @@ static void property_update_destroy (struct property_update *pu)
  */
 static int property_update_commit (struct inventory *inv,
                                    const flux_msg_t *msg,
-                                   json_t *R)
+                                   json_t *R,
+                                   json_t *exclusive)
 {
     json_decref (inv->R);
     inv->R = json_incref (R);
+    json_decref (inv->exclusive);
+    inv->exclusive = json_incref (exclusive);
 
     if (reslog_post_pack (inv->ctx->reslog,
                           msg,
@@ -1227,7 +1334,7 @@ static void property_update_continuation (flux_future_t *f, void *arg)
             flux_log_error (h, "error responding to property-update request");
         goto done;
     }
-    if (property_update_commit (pu->inv, pu->msg, pu->R) < 0) {
+    if (property_update_commit (pu->inv, pu->msg, pu->R, pu->exclusive) < 0) {
         if (flux_respond_error (h, pu->msg, errno, NULL) < 0)
             flux_log_error (h, "error responding to property-update request");
     }
@@ -1243,8 +1350,11 @@ done:
 static int property_update_request (struct inventory *inv,
                                     const flux_msg_t *msg,
                                     json_t *newR,
+                                    json_t *newE,
                                     json_t *add_ranks,
                                     json_t *remove_ranks,
+                                    json_t *exclusive_add,
+                                    json_t *exclusive_remove,
                                     flux_error_t *errp)
 {
     struct property_update *pu;
@@ -1257,17 +1367,20 @@ static int property_update_request (struct inventory *inv,
     pu->inv = inv;
     pu->msg = flux_msg_incref (msg);
     pu->R = json_incref (newR);
+    pu->exclusive = json_incref (newE);
 
-    /* Both keys are optional per RFC 28, so "O*" omits the one that is
+    /* All keys are optional per RFC 28, so "O*" omits the ones that are
      * NULL rather than failing as "s?O" would.
      */
     if (!(f = flux_rpc_pack (inv->ctx->h,
                              "sched.property-update",
                              FLUX_NODEID_ANY,
                              0,
-                             "{s:O* s:O*}",
+                             "{s:O* s:O* s:O* s:O*}",
                              "property-add", add_ranks,
-                             "property-remove", remove_ranks))
+                             "property-remove", remove_ranks,
+                             "exclusive-add", exclusive_add,
+                             "exclusive-remove", exclusive_remove))
         || flux_future_then (f, -1., property_update_continuation, pu) < 0) {
         errprintf (errp, "error sending sched.property-update request");
         flux_future_destroy (f);
@@ -1285,9 +1398,12 @@ static void resource_property_update (flux_t *h,
     struct inventory *inv = arg;
     json_t *add = NULL;
     json_t *remove = NULL;
+    json_t *exclusive_add = NULL;
+    json_t *exclusive_remove = NULL;
     json_t *add_ranks = NULL;
     json_t *remove_ranks = NULL;
     json_t *newR = NULL;
+    json_t *newE = NULL;
     struct rlist *rl = NULL;
     flux_error_t error;
     const char *errstr = NULL;
@@ -1304,9 +1420,11 @@ static void resource_property_update (flux_t *h,
     }
     if (flux_request_unpack (msg,
                              NULL,
-                             "{s?o s?o}",
+                             "{s?o s?o s?o s?o}",
                              "property-add", &add,
-                             "property-remove", &remove) < 0)
+                             "property-remove", &remove,
+                             "exclusive-add", &exclusive_add,
+                             "exclusive-remove", &exclusive_remove) < 0)
         goto error;
 
     /* Validate everything before the scheduler is told anything, so that
@@ -1325,9 +1443,29 @@ static void resource_property_update (flux_t *h,
         errstr = error.text;
         goto error;
     }
+    if ((exclusive_add
+         && check_exclusive_names (exclusive_add, "exclusive-add", &error) < 0)
+        || (exclusive_remove
+            && check_exclusive_names (exclusive_remove,
+                                      "exclusive-remove",
+                                      &error) < 0)) {
+        errstr = error.text;
+        goto error;
+    }
+    if (!(newE = exclusive_update (inv->exclusive,
+                                   exclusive_add,
+                                   exclusive_remove,
+                                   &error))) {
+        errstr = error.text;
+        goto error;
+    }
+    /* A request with only exclusive keys leaves R unchanged, but the commit
+     * path below always swaps in 'newR', so make the copy unconditionally.
+     */
     if (!(newR = queue_membership_copy (inv->R)))
         goto error;
-    if (queue_membership_update (newR, add_ranks, remove_ranks, &error) < 0) {
+    if ((add_ranks || remove_ranks)
+        && queue_membership_update (newR, add_ranks, remove_ranks, &error) < 0) {
         errstr = error.text;
         goto error;
     }
@@ -1339,14 +1477,17 @@ static void resource_property_update (flux_t *h,
      * happened to be reloading.
      */
     if (acquire_clients (inv->ctx->acquire) == 0) {
-        if (property_update_commit (inv, msg, newR) < 0)
+        if (property_update_commit (inv, msg, newR, newE) < 0)
             goto error;
     }
     else if (property_update_request (inv,
                                       msg,
                                       newR,
+                                      newE,
                                       add_ranks,
                                       remove_ranks,
+                                      exclusive_add,
+                                      exclusive_remove,
                                       &error) < 0) {
         errstr = error.text;
         goto error;
@@ -1355,6 +1496,7 @@ done:
     json_decref (add_ranks);
     json_decref (remove_ranks);
     json_decref (newR);
+    json_decref (newE);
     rlist_destroy (rl);
     return;
 error:
@@ -1398,6 +1540,7 @@ void inventory_destroy (struct inventory *inv)
         flux_msg_handler_delvec (inv->handlers);
         json_decref (inv->R);
         json_decref (inv->R_stored);
+        json_decref (inv->exclusive);
         free (inv->method);
         flux_future_destroy (inv->put_f);
         R_watch_destroy (inv);
@@ -1416,6 +1559,10 @@ struct inventory *inventory_create (struct resource_ctx *ctx,
     if (!(inv = calloc (1, sizeof (*inv))))
         return NULL;
     inv->ctx = ctx;
+    if (!(inv->exclusive = json_array ())) {
+        errno = ENOMEM;
+        goto error;
+    }
     if (flux_msg_handler_addvec (ctx->h, htab, inv, &inv->handlers) < 0)
         goto error;
     if (config->R && convert_R_conf (ctx->h, config->R, &R) < 0)

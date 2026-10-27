@@ -245,9 +245,12 @@ error:
 /* Send the first response to resource.acquire request.  This presumes
  * that acquire_request_init() has already prepared ar->resources and ar->up.
  */
-static int acquire_respond_first (flux_t *h, const flux_msg_t *msg)
+static int acquire_respond_first (flux_t *h,
+                                  const flux_msg_t *msg,
+                                  struct resource_ctx *ctx)
 {
     struct acquire_request *ar = flux_msg_aux_get (msg, "acquire");
+    json_t *exclusive = inventory_get_exclusive (ctx->inventory);
     json_t *o = NULL;
 
     if (!(o = json_object()))
@@ -256,6 +259,12 @@ static int acquire_respond_first (flux_t *h, const flux_msg_t *msg)
         goto nomem;
     if (rutil_set_json_idset (o, "up", ar->up) < 0)
         goto error;
+    /* The exclusive property set (E) is sent only when non-empty, so that
+     * the common case response is unchanged.
+     */
+    if (json_array_size (exclusive) > 0
+        && json_object_set (o, "exclusive", exclusive) < 0)
+        goto nomem;
     if (flux_respond_pack (h, msg, "O", o) < 0)
         goto error;
     json_decref (o);
@@ -334,7 +343,7 @@ static void acquire_cb (flux_t *h,
 
     if (acquire_request_init (ar, acquire, resobj) < 0)
         goto error;
-    if (acquire_respond_first (h, msg) < 0)
+    if (acquire_respond_first (h, msg, acquire->ctx) < 0)
         flux_log_error (h, "error responding to acquire request");
     return;
 error:
@@ -428,7 +437,7 @@ static void reslog_cb (struct reslog *reslog,
                     goto error;
 
                 }
-                if (acquire_respond_first (h, msg) < 0) {
+                if (acquire_respond_first (h, msg, ctx) < 0) {
                     flux_log_error (h,
                                     "error responding to resource.acquire (%s)",
                                     name);
