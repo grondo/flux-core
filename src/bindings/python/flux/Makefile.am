@@ -91,6 +91,7 @@ nobase_fluxpy_PYTHON = \
 	uri/resolvers/slurm.py \
 	uri/resolvers/lsf.py \
 	constraint/parser.py \
+	constraint/requires.py \
 	constraint/parsetab.py \
 	constraint/__init__.py \
 	shape/parser.py \
