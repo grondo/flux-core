@@ -21,6 +21,10 @@ void pipeline_destroy (struct pipeline *pl);
 
 void pipeline_shutdown (struct pipeline *pl);
 
+/* Restart the workers so they pick up a queue configuration change.
+ */
+void pipeline_restart_workers (struct pipeline *pl);
+
 int pipeline_configure (struct pipeline *pl,
                         const flux_conf_t *conf,
                         int argc,

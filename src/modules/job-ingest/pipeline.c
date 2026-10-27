@@ -81,6 +81,18 @@ void pipeline_shutdown (struct pipeline *pl)
 
 }
 
+/* Stop the current workers, which are restarted on demand with the
+ * configuration they are started with.  The frobnicator and validator
+ * read the queue configuration once at startup, so a queue added or
+ * removed at runtime is not visible to them until they restart.  This
+ * is what workcrew_configure() does at its end.
+ */
+void pipeline_restart_workers (struct pipeline *pl)
+{
+    (void)workcrew_stop_notify (pl->frobnicate, NULL, NULL);
+    (void)workcrew_stop_notify (pl->validate, NULL, NULL);
+}
+
 static bool validator_bypass (struct pipeline *pl, struct job *job)
 {
     if ((pl->validator_bypass || (job->flags & FLUX_JOB_NOVALIDATE)))

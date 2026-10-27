@@ -807,7 +807,23 @@ error:
 }
 
 
+/* The job-manager created or removed a queue at runtime.  The workers
+ * cache the queue configuration at startup, so restart them, else a job
+ * submitted to a new queue is rejected as invalid until they happen to
+ * restart for another reason.
+ */
+static void queue_update_cb (flux_t *h,
+                             flux_msg_handler_t *mh,
+                             const flux_msg_t *msg,
+                             void *arg)
+{
+    struct job_ingest_ctx *ctx = arg;
+
+    pipeline_restart_workers (ctx->pipeline);
+}
+
 static const struct flux_msg_handler_spec htab[] = {
+    { FLUX_MSGTYPE_EVENT,  "job-manager.queue-update", queue_update_cb, 0 },
     { FLUX_MSGTYPE_REQUEST,  "job-ingest.getinfo", getinfo_cb, 0},
     { FLUX_MSGTYPE_REQUEST,  "job-ingest.submit", submit_cb, FLUX_ROLE_USER },
     { FLUX_MSGTYPE_REQUEST,  "job-ingest.shutdown", shutdown_cb, 0 },
@@ -853,6 +869,10 @@ int job_ingest_ctx_init (struct job_ingest_ctx *ctx,
 #endif
     if (flux_msg_handler_addvec (h, htab, ctx, &ctx->handlers) < 0) {
         flux_log_error (h, "flux_msghandler_add");
+        return -1;
+    }
+    if (flux_event_subscribe (h, "job-manager.queue-update") < 0) {
+        flux_log_error (h, "flux_event_subscribe");
         return -1;
     }
     if (!(ctx->timer = flux_timer_watcher_create (r, 0., 0.,
