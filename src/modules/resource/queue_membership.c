@@ -118,7 +118,7 @@ nomem:
     json_decref (cpy);
     json_decref (execution);
     json_decref (props);
-    errno = ENOMEM;
+    errno = ENOMEM;  // set last: the decrefs above may clobber errno
     return NULL;
 }
 
@@ -165,7 +165,7 @@ int queue_membership_apply (json_t *R,
             goto done;
         (void)snprintf (prop, sizeof (prop), "+%s", name);
         if (rlist_add_property (rl, errp, prop, ranks) < 0) {
-            free (ranks);
+            ERRNO_SAFE_WRAP (free, ranks);
             goto done;
         }
         free (ranks);
