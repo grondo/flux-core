@@ -14,6 +14,7 @@ import time
 import unittest
 
 import subflux  # noqa: F401 - for PYTHONPATH
+from flux.constraint.requires import requires
 from flux.resource import InfeasibleRequest, InsufficientResources
 from flux.resource.Rv1Pool import ResourceRequest, Rv1Pool
 from flux.resourcecount import ResourceCount
@@ -1027,6 +1028,107 @@ class TestRv1PoolSetRemoveProperty(unittest.TestCase):
         self.pool.set_property("+batch", "0-3")
         self.pool.remove_ranks(IDset("2-3"))
         self.assertEqual(self.properties(), {"+batch": "0-1"})
+
+
+class TestRequires(unittest.TestCase):
+    """requires(): the properties a constraint guarantees a rank has."""
+
+    def test_none(self):
+        self.assertEqual(requires(None), set())
+
+    def test_properties(self):
+        self.assertEqual(requires({"properties": ["batch"]}), {"batch"})
+        self.assertEqual(requires({"properties": ["+dat", "batch"]}), {"+dat", "batch"})
+
+    def test_negated_property_contributes_nothing(self):
+        self.assertEqual(requires({"properties": ["^+dat"]}), set())
+        self.assertEqual(requires({"properties": ["^+dat", "batch"]}), {"batch"})
+
+    def test_and_is_union(self):
+        c = {"and": [{"properties": ["+dat"]}, {"properties": ["batch"]}]}
+        self.assertEqual(requires(c), {"+dat", "batch"})
+
+    def test_or_is_intersection(self):
+        c = {"or": [{"properties": ["+dat"]}, {"properties": ["batch"]}]}
+        self.assertEqual(requires(c), set())
+        c = {"or": [{"properties": ["+dat", "a"]}, {"properties": ["+dat", "b"]}]}
+        self.assertEqual(requires(c), {"+dat"})
+
+    def test_not_is_empty(self):
+        self.assertEqual(requires({"not": [{"properties": ["+dat"]}]}), set())
+
+    def test_empty_constraint(self):
+        self.assertEqual(requires({}), set())
+        self.assertEqual(requires({"or": []}), set())
+
+    def test_json_string_accepted(self):
+        self.assertEqual(requires('{"properties": ["+dat"]}'), {"+dat"})
+
+    def test_non_object_raises(self):
+        with self.assertRaises(ValueError):
+            requires("[1, 2]")
+
+
+class TestRv1PoolExclusiveProperties(unittest.TestCase):
+    """The exclusive property set (E), as driven by sched.property-update."""
+
+    def setUp(self):
+        self.pool = Rv1Pool(R_4x4)
+        self.pool.update_properties({"batch": "0-3", "+dat": "2-3"})
+        self.pool.update_exclusive(add=["+dat"])
+
+    def batch(self, nnodes):
+        return rr(nnodes, nnodes, 1, constraint={"properties": ["batch"]})
+
+    def dat(self, nnodes):
+        return rr(nnodes, nnodes, 1, constraint={"properties": ["+dat"]})
+
+    def test_initially_empty(self):
+        self.assertEqual(Rv1Pool(R_4x4).get_exclusive(), set())
+
+    def test_update_exclusive(self):
+        self.assertEqual(self.pool.get_exclusive(), {"+dat"})
+        self.pool.update_exclusive(remove=["+dat"])
+        self.assertEqual(self.pool.get_exclusive(), set())
+
+    def test_generation_bumped(self):
+        gen = self.pool.generation
+        self.pool.update_exclusive(add=["+other"])
+        self.assertGreater(self.pool.generation, gen)
+
+    def test_donor_job_avoids_exclusive_ranks(self):
+        a = self.pool.alloc(1, self.batch(2))
+        self.assertEqual(sorted(a._ranks), [0, 1])
+
+    def test_opted_in_job_uses_exclusive_ranks(self):
+        a = self.pool.alloc(1, self.dat(2))
+        self.assertEqual(sorted(a._ranks), [2, 3])
+
+    def test_unconstrained_job_avoids_exclusive_ranks(self):
+        a = self.pool.alloc(1, rr(2, 2, 1))
+        self.assertEqual(sorted(a._ranks), [0, 1])
+
+    # A job that E excludes must wait, not be rejected: the ranks come
+    # back when the exclusive queue is stopped.
+    def test_excluded_job_is_insufficient_not_infeasible(self):
+        req = self.batch(4)
+        self.pool.check_feasibility(req)
+        with self.assertRaises(InsufficientResources):
+            self.pool.alloc(1, req)
+
+    def test_ranks_return_when_no_longer_exclusive(self):
+        self.pool.update_exclusive(remove=["+dat"])
+        a = self.pool.alloc(1, self.batch(4))
+        self.assertEqual(sorted(a._ranks), [0, 1, 2, 3])
+
+    def test_exclusive_set_survives_copy(self):
+        self.assertEqual(self.pool.copy().get_exclusive(), {"+dat"})
+
+    def test_or_constraint_does_not_opt_in(self):
+        # 'or' guarantees nothing, so this job may not use the +dat ranks.
+        c = {"or": [{"properties": ["+dat"]}, {"properties": ["batch"]}]}
+        a = self.pool.alloc(1, rr(2, 2, 1, constraint=c))
+        self.assertEqual(sorted(a._ranks), [0, 1])
 
 
 class TestRv1PoolRemoveRanks(unittest.TestCase):

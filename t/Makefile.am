@@ -225,6 +225,7 @@ TESTSCRIPTS = \
 	t2354-resource-status.t \
 	t2355-resource-journal.t \
 	t2356-resource-property-update.t \
+	t2357-resource-exclusive.t \
 	t2400-job-exec-test.t \
 	t2401-job-exec-hello.t \
 	t2402-job-exec-dummy.t \
