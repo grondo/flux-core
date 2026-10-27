@@ -200,6 +200,18 @@ const char *queue_disable_reason (struct queue *q);
 bool queue_is_started (struct queue *q);
 const char *queue_stop_reason (struct queue *q);
 
+/* Runtime queue (created by job-manager.queue-add) accessors.
+ *
+ * An exclusive queue's property is in the resource module's exclusive
+ * set while the queue is started, so that its hosts are offered only to
+ * its own jobs.  'hosts' is the hostlist given at add time, kept so that
+ * the property can be undone at remove time.
+ */
+bool queue_is_runtime (struct queue *q);
+bool queue_is_exclusive (struct queue *q);
+const char *queue_hosts (struct queue *q);
+int queue_set_runtime (struct queue *q, bool exclusive, const char *hosts);
+
 /* Virtual queue (RFC 33) accessors.
  *
  * A queue is virtual iff its config sets 'parent'. Inheritance is one

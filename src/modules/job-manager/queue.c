@@ -61,6 +61,7 @@
 #include "src/common/libutil/jpath.h"
 #include "src/common/libutil/errno_safe.h"
 #include "src/common/libczmqcontainers/czmq_containers.h"
+#include "src/common/libfluxutil/conf_policy.h"
 #include "ccan/str/str.h"
 
 #include "alloc.h"
@@ -465,6 +466,318 @@ error:
         flux_log_error (h, "error responding to job-manager.queue-start");
 }
 
+/* Context for a runtime queue add or remove awaiting the resource
+ * module's response to resource.property-update.
+ */
+struct queue_rpc {
+    struct queue_ctx *qctx;
+    const flux_msg_t *msg;      // the request, answered when complete
+    char *name;
+    char *hosts;
+};
+
+static void queue_rpc_destroy (struct queue_rpc *qr)
+{
+    if (qr) {
+        int saved_errno = errno;
+        flux_msg_decref (qr->msg);
+        free (qr->name);
+        free (qr->hosts);
+        free (qr);
+        errno = saved_errno;
+    }
+}
+
+static struct queue_rpc *queue_rpc_create (struct queue_ctx *qctx,
+                                           const flux_msg_t *msg,
+                                           const char *name,
+                                           const char *hosts)
+{
+    struct queue_rpc *qr;
+
+    if (!(qr = calloc (1, sizeof (*qr))))
+        return NULL;
+    qr->qctx = qctx;
+    qr->msg = flux_msg_incref (msg);
+    if (!(qr->name = strdup (name))
+        || (hosts && !(qr->hosts = strdup (hosts)))) {
+        queue_rpc_destroy (qr);
+        errno = ENOMEM;
+        return NULL;
+    }
+    return qr;
+}
+
+/* Tell jobtap plugins and job-ingest that the queue table changed, so
+ * that a new queue is accepted at submit without a config reload.
+ */
+static void queue_runtime_notify (struct queue_ctx *qctx)
+{
+    flux_t *h = qctx->ctx->h;
+    flux_error_t error;
+    flux_future_t *f;
+
+    if (jobtap_notify_queues_update (qctx->ctx->jobtap,
+                                     queue_ctx_get_conf (qctx),
+                                     &error) < 0)
+        flux_log (h, LOG_ERR, "queues-update: %s", error.text);
+    if (!(f = flux_event_publish (h, "job-manager.queue-update", 0, NULL)))
+        flux_log_error (h, "error publishing job-manager.queue-update");
+    flux_future_destroy (f);
+}
+
+/* Undo a property that was applied before a later step failed. Best
+ * effort: the operation has already failed, so only log an error.
+ */
+static void queue_property_undo (struct queue_ctx *qctx,
+                                 const char *name,
+                                 const char *hosts)
+{
+    flux_t *h = qctx->ctx->h;
+    char prop[QUEUE_PROPERTY_MAX];
+    flux_future_t *f;
+
+    (void)snprintf (prop, sizeof (prop), "+%s", name);
+    if (!(f = flux_rpc_pack (h,
+                             "resource.property-update",
+                             0,
+                             FLUX_RPC_NORESPONSE,
+                             "{s:{s:s}}",
+                             "property-remove", prop, hosts)))
+        flux_log_error (h, "error undoing property %s", prop);
+    flux_future_destroy (f);
+}
+
+/* The property is applied, so create the queue. It is left enabled and
+ * stopped (the default for a named queue), so that users may submit to
+ * it before it starts.
+ */
+static void queue_add_continuation (flux_future_t *f, void *arg)
+{
+    struct queue_rpc *qr = arg;
+    struct queue_ctx *qctx = qr->qctx;
+    flux_t *h = qctx->ctx->h;
+    flux_error_t error;
+    const char *errmsg = NULL;
+    json_t *config = NULL;
+    struct queue *q;
+
+    if (flux_future_get (f, NULL) < 0) {
+        errmsg = future_strerror (f, errno);
+        goto error;
+    }
+    if (!(config = json_pack ("{s:s}", "hosts", qr->hosts))) {
+        errno = ENOMEM;
+        goto error;
+    }
+    /* queue_parse_config() derives requires = ["+NAME"] from 'hosts',
+     * matching a configured hosts queue.
+     */
+    if (!(q = queues_add (qctx->queues, qr->name, config, &error))) {
+        errmsg = error.text;
+        goto undo;
+    }
+    if (queue_set_runtime (q, true, qr->hosts) < 0) {
+        (void)queues_remove (qctx->queues, qr->name, &error);
+        goto undo;
+    }
+    queue_runtime_notify (qctx);
+    if (flux_respond (h, qr->msg, NULL) < 0)
+        flux_log_error (h, "error responding to job-manager.queue-add");
+    goto done;
+undo:
+    queue_property_undo (qctx, qr->name, qr->hosts);
+error:
+    if (flux_respond_error (h, qr->msg, errno, errmsg) < 0)
+        flux_log_error (h, "error responding to job-manager.queue-add");
+done:
+    json_decref (config);
+    flux_future_destroy (f);
+    queue_rpc_destroy (qr);
+}
+
+/* Create a queue at runtime (RFC 33 runtime queues).
+ *
+ * The property is applied first, so that the queue never exists without
+ * the resources it names. On failure nothing is created.
+ */
+static void queue_add_cb (flux_t *h,
+                          flux_msg_handler_t *mh,
+                          const flux_msg_t *msg,
+                          void *arg)
+{
+    struct queue_ctx *qctx = arg;
+    const char *errmsg = NULL;
+    const char *name;
+    const char *hosts;
+    char prop[QUEUE_PROPERTY_MAX];
+    struct queue_rpc *qr = NULL;
+    flux_future_t *f = NULL;
+
+    if (flux_request_unpack (msg,
+                             NULL,
+                             "{s:s s:s}",
+                             "name", &name,
+                             "hosts", &hosts) < 0)
+        goto error;
+    if (!queues_have_named (qctx->queues)) {
+        errmsg = "runtime queues require named queues";
+        errno = EINVAL;
+        goto error;
+    }
+    if (queues_lookup (qctx->queues, name, NULL)) {
+        errmsg = "queue already exists";
+        errno = EEXIST;
+        goto error;
+    }
+    /* The membership property is "+NAME", so the name must be a valid
+     * RFC 20 property name, as for a configured 'hosts' queue.
+     */
+    if (strlen (name) == 0
+        || strlen (name) > QUEUE_NAME_MAX
+        || strpbrk (name, QUEUE_BANNED_PROPERTY_CHARS)) {
+        errmsg = "queue name is not a valid property string (RFC 20)";
+        errno = EINVAL;
+        goto error;
+    }
+    if (strlen (hosts) == 0) {
+        errmsg = "hosts must not be empty";
+        errno = EINVAL;
+        goto error;
+    }
+    (void)snprintf (prop, sizeof (prop), "+%s", name);
+    if (!(qr = queue_rpc_create (qctx, msg, name, hosts))
+        || !(f = flux_rpc_pack (h,
+                                "resource.property-update",
+                                0,
+                                0,
+                                "{s:{s:s}}",
+                                "property-add", prop, hosts))
+        || flux_future_then (f, -1., queue_add_continuation, qr) < 0) {
+        errmsg = "error sending resource.property-update request";
+        flux_future_destroy (f);
+        queue_rpc_destroy (qr);
+        goto error;
+    }
+    return; // 'qr' is owned by the continuation now
+error:
+    if (flux_respond_error (h, msg, errno, errmsg) < 0)
+        flux_log_error (h, "error responding to job-manager.queue-add");
+}
+
+static void queue_remove_continuation (flux_future_t *f, void *arg)
+{
+    struct queue_rpc *qr = arg;
+    struct queue_ctx *qctx = qr->qctx;
+    flux_t *h = qctx->ctx->h;
+    flux_error_t error;
+    const char *errmsg = NULL;
+
+    if (flux_future_get (f, NULL) < 0) {
+        errmsg = future_strerror (f, errno);
+        goto error;
+    }
+    if (queues_remove (qctx->queues, qr->name, &error) < 0) {
+        errmsg = error.text;
+        goto error;
+    }
+    queue_runtime_notify (qctx);
+    if (flux_respond (h, qr->msg, NULL) < 0)
+        flux_log_error (h, "error responding to job-manager.queue-remove");
+    goto done;
+error:
+    if (flux_respond_error (h, qr->msg, errno, errmsg) < 0)
+        flux_log_error (h, "error responding to job-manager.queue-remove");
+done:
+    flux_future_destroy (f);
+    queue_rpc_destroy (qr);
+}
+
+/* Return true if any active job is in queue 'name' and has not yet been
+ * allocated resources.
+ */
+static bool queue_has_pending_jobs (struct queue_ctx *qctx, const char *name)
+{
+    struct job *job = zhashx_first (qctx->ctx->active_jobs);
+
+    while (job) {
+        if (queue_name_covers (qctx, name, job->queue)
+            && job->state != FLUX_JOB_STATE_INACTIVE
+            && job->state <= FLUX_JOB_STATE_SCHED)
+            return true;
+        job = zhashx_next (qctx->ctx->active_jobs);
+    }
+    return false;
+}
+
+/* Remove a runtime queue and its property.
+ *
+ * The property and the exclusive set entry are removed in one update,
+ * so the ranks never linger as exclusive for a queue that is gone.
+ */
+static void queue_remove_cb (flux_t *h,
+                             flux_msg_handler_t *mh,
+                             const flux_msg_t *msg,
+                             void *arg)
+{
+    struct queue_ctx *qctx = arg;
+    flux_error_t error;
+    const char *errmsg = NULL;
+    const char *name;
+    struct queue *q;
+    const char *hosts;
+    char prop[QUEUE_PROPERTY_MAX];
+    struct queue_rpc *qr = NULL;
+    flux_future_t *f = NULL;
+
+    if (flux_request_unpack (msg, NULL, "{s:s}", "name", &name) < 0)
+        goto error;
+    if (!(q = queues_lookup (qctx->queues, name, &error))) {
+        errmsg = error.text;
+        errno = ENOENT;
+        goto error;
+    }
+    if (!queue_is_runtime (q)) {
+        errmsg = "only a runtime queue may be removed";
+        errno = EINVAL;
+        goto error;
+    }
+    /* Raising exceptions on pending jobs is out of scope for now, so
+     * refuse rather than strand them in a queue that no longer exists.
+     */
+    if (queue_has_pending_jobs (qctx, name)) {
+        errmsg = "queue has pending jobs";
+        errno = EBUSY;
+        goto error;
+    }
+    hosts = queue_hosts (q);
+    (void)snprintf (prop, sizeof (prop), "+%s", name);
+    if (queue_is_started (q)
+        && queues_stop_queue (qctx->queues, name, "queue removed", 1, &error) < 0) {
+        errmsg = error.text;
+        errno = EINVAL;
+        goto error;
+    }
+    if (!(qr = queue_rpc_create (qctx, msg, name, hosts))
+        || !(f = flux_rpc_pack (h,
+                                "resource.property-update",
+                                0,
+                                0,
+                                "{s:{s:s} s:[s]}",
+                                "property-remove", prop, hosts,
+                                "exclusive-remove", prop))
+        || flux_future_then (f, -1., queue_remove_continuation, qr) < 0) {
+        errmsg = "error sending resource.property-update request";
+        flux_future_destroy (f);
+        queue_rpc_destroy (qr);
+        goto error;
+    }
+    return; // 'qr' is owned by the continuation now
+error:
+    if (flux_respond_error (h, msg, errno, errmsg) < 0)
+        flux_log_error (h, "error responding to job-manager.queue-remove");
+}
+
 static const struct flux_msg_handler_spec htab[] = {
     {
         FLUX_MSGTYPE_REQUEST,
@@ -488,6 +801,18 @@ static const struct flux_msg_handler_spec htab[] = {
         FLUX_MSGTYPE_REQUEST,
         "job-manager.queue-start",
         queue_start_cb,
+        0,
+    },
+    {
+        FLUX_MSGTYPE_REQUEST,
+        "job-manager.queue-add",
+        queue_add_cb,
+        0,
+    },
+    {
+        FLUX_MSGTYPE_REQUEST,
+        "job-manager.queue-remove",
+        queue_remove_cb,
         0,
     },
     FLUX_MSGHANDLER_TABLE_END,

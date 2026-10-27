@@ -70,6 +70,16 @@ struct queue {
                                  * (validated elsewhere) so this is
                                  * never itself virtual.
                                  */
+    bool is_runtime;            /* created by job-manager.queue-add rather
+                                 * than by configuration
+                                 */
+    bool is_exclusive;          /* while started, this queue's property is
+                                 * in the resource module's exclusive set
+                                 */
+    char *hosts;                /* hosts given at add time, needed to undo
+                                 * the property at remove time (runtime
+                                 * queues only)
+                                 */
     struct queues *queues;      /* back-pointer for notify */
 };
 
@@ -126,6 +136,7 @@ static void queue_free (struct queue *q)
         free (q->name);
         free (q->disable_reason);
         free (q->stop_reason);
+        free (q->hosts);
         free (q);
         errno = saved_errno;
     }
@@ -459,12 +470,15 @@ static struct queue *queue_dup (struct queues *queues, struct queue *q)
     cpy->is_enabled = q->is_enabled;
     cpy->is_started = q->is_started;
     cpy->is_started_sticky = q->is_started_sticky;
+    cpy->is_runtime = q->is_runtime;
+    cpy->is_exclusive = q->is_exclusive;
     cpy->requires = json_incref (q->requires);
     cpy->policy = json_incref (q->policy);
     if ((q->disable_reason
          && !(cpy->disable_reason = strdup (q->disable_reason)))
         || (q->stop_reason
-            && !(cpy->stop_reason = strdup (q->stop_reason)))) {
+            && !(cpy->stop_reason = strdup (q->stop_reason)))
+        || (q->hosts && !(cpy->hosts = strdup (q->hosts)))) {
         queue_free (cpy);
         errno = ENOMEM;
         return NULL;
@@ -1524,6 +1538,36 @@ const char *queue_disable_reason (struct queue *q)
 bool queue_is_started (struct queue *q)
 {
     return q->is_started;
+}
+
+bool queue_is_runtime (struct queue *q)
+{
+    return q->is_runtime;
+}
+
+bool queue_is_exclusive (struct queue *q)
+{
+    return q->is_exclusive;
+}
+
+const char *queue_hosts (struct queue *q)
+{
+    return q->hosts;
+}
+
+int queue_set_runtime (struct queue *q, bool exclusive, const char *hosts)
+{
+    char *cpy = NULL;
+
+    if (hosts && !(cpy = strdup (hosts))) {
+        errno = ENOMEM;
+        return -1;
+    }
+    free (q->hosts);
+    q->hosts = cpy;
+    q->is_runtime = true;
+    q->is_exclusive = exclusive;
+    return 0;
 }
 
 const char *queue_stop_reason (struct queue *q)

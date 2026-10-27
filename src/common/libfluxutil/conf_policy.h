@@ -22,6 +22,12 @@
 #define QUEUE_PROPERTY_MAX 128
 #define QUEUE_NAME_MAX (QUEUE_PROPERTY_MAX - 2)
 
+/* Characters that may not appear in an RFC 20 property name.  '^' is
+ * additionally banned in a name applied to a resource, since unlike a
+ * constraint it cannot be negated.
+ */
+#define QUEUE_BANNED_PROPERTY_CHARS " \t!&'\"`|()^"
+
 /* Validate [policy] and [queue] configuration tables defined in RFC 33.
  * Return 0 on success, -1 on failure with errno set and 'error' filled in.
  */
