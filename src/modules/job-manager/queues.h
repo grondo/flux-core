@@ -207,6 +207,11 @@ const char *queue_stop_reason (struct queue *q);
  * its own jobs.  'hosts' is the hostlist given at add time, kept so that
  * the property can be undone at remove time.
  */
+bool queues_have_exclusive (struct queues *queues);
+/* The membership property of every exclusive queue, as a new JSON array
+ * of names (caller decrefs), or NULL on error with errno set.
+ */
+json_t *queues_exclusive_names (struct queues *queues);
 bool queue_is_runtime (struct queue *q);
 bool queue_is_exclusive (struct queue *q);
 const char *queue_hosts (struct queue *q);

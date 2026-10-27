@@ -409,6 +409,156 @@ static void dequeue_jobs (struct queue_ctx *qctx, const char *name)
     }
 }
 
+/* Context for a start or stop of an exclusive queue awaiting the
+ * resource module's response to resource.property-update.
+ */
+struct queue_exclusive {
+    struct queue_ctx *qctx;
+    const flux_msg_t *msg;
+    char *name;
+    bool start;
+    int nocheckpoint;
+    char *stop_reason;
+};
+
+static void queue_exclusive_destroy (struct queue_exclusive *qe)
+{
+    if (qe) {
+        int saved_errno = errno;
+        flux_msg_decref (qe->msg);
+        free (qe->name);
+        free (qe->stop_reason);
+        free (qe);
+        errno = saved_errno;
+    }
+}
+
+/* A start applies the exclusive property first and starts the queue in
+ * the continuation, so that by the time the queue's jobs are considered,
+ * other jobs are already excluded.  A stop goes the other way: the queue
+ * is stopped before the property is released, so that no new job from it
+ * starts after the nodes are returned.
+ */
+static void queue_exclusive_continuation (flux_future_t *f, void *arg)
+{
+    struct queue_exclusive *qe = arg;
+    struct queue_ctx *qctx = qe->qctx;
+    flux_t *h = qctx->ctx->h;
+    flux_error_t error;
+    const char *errmsg = NULL;
+
+    if (flux_future_get (f, NULL) < 0) {
+        errmsg = future_strerror (f, errno);
+        goto error;
+    }
+    if (qe->start
+        && queues_start_queue (qctx->queues,
+                               qe->name,
+                               qe->nocheckpoint,
+                               &error) < 0) {
+        errmsg = error.text;
+        errno = EINVAL;
+        goto error;
+    }
+    if (flux_respond (h, qe->msg, NULL) < 0)
+        flux_log_error (h, "error responding to job-manager.queue-start");
+    goto done;
+error:
+    if (flux_respond_error (h, qe->msg, errno, errmsg) < 0)
+        flux_log_error (h, "error responding to job-manager.queue-start");
+done:
+    flux_future_destroy (f);
+    queue_exclusive_destroy (qe);
+}
+
+/* Start or stop an exclusive queue, updating the resource module's
+ * exclusive set.  Returns 0 if the update was sent (the request is
+ * answered in the continuation), or -1 with 'errmsgp' set.
+ */
+static int queue_exclusive_update (struct queue_ctx *qctx,
+                                   const flux_msg_t *msg,
+                                   const char *name,
+                                   bool start,
+                                   const char *stop_reason,
+                                   int nocheckpoint,
+                                   const char **errmsgp)
+{
+    flux_t *h = qctx->ctx->h;
+    flux_error_t error;
+    char prop[QUEUE_PROPERTY_MAX];
+    struct queue_exclusive *qe;
+    flux_future_t *f = NULL;
+
+    if (!start
+        && queues_stop_queue (qctx->queues,
+                              name,
+                              stop_reason,
+                              nocheckpoint,
+                              &error) < 0) {
+        *errmsgp = error.text;
+        errno = EINVAL;
+        return -1;
+    }
+    (void)snprintf (prop, sizeof (prop), "+%s", name);
+    if (!(qe = calloc (1, sizeof (*qe))))
+        goto error;
+    qe->qctx = qctx;
+    qe->msg = flux_msg_incref (msg);
+    qe->start = start;
+    qe->nocheckpoint = nocheckpoint;
+    if (!(qe->name = strdup (name))
+        || (stop_reason && !(qe->stop_reason = strdup (stop_reason)))) {
+        errno = ENOMEM;
+        goto error;
+    }
+    if (!(f = flux_rpc_pack (h,
+                             "resource.property-update",
+                             0,
+                             0,
+                             "{s:[s]}",
+                             start ? "exclusive-add" : "exclusive-remove",
+                             prop))
+        || flux_future_then (f, -1., queue_exclusive_continuation, qe) < 0)
+        goto error;
+    return 0; // 'qe' is owned by the continuation now
+error:
+    *errmsgp = "error sending resource.property-update request";
+    flux_future_destroy (f);
+    queue_exclusive_destroy (qe);
+    return -1;
+}
+
+/* Release every exclusive queue's property from the resource module's
+ * exclusive set, without waiting for a response.
+ *
+ * Used by an --all stop, which instance shutdown issues and which
+ * therefore must not fail.  The queues are already stopped by the time
+ * this runs, so the ordering that matters is preserved: no new job from
+ * an exclusive queue starts after its nodes are returned.
+ */
+static void queue_exclusive_release_all (struct queue_ctx *qctx)
+{
+    flux_t *h = qctx->ctx->h;
+    json_t *names;
+
+    if (!(names = queues_exclusive_names (qctx->queues))) {
+        flux_log_error (h, "error listing exclusive queues");
+        return;
+    }
+    if (json_array_size (names) > 0) {
+        flux_future_t *f;
+        if (!(f = flux_rpc_pack (h,
+                                 "resource.property-update",
+                                 0,
+                                 FLUX_RPC_NORESPONSE,
+                                 "{s:O}",
+                                 "exclusive-remove", names)))
+            flux_log_error (h, "error releasing exclusive properties");
+        flux_future_destroy (f);
+    }
+    json_decref (names);
+}
+
 static void queue_start_cb (flux_t *h,
                             flux_msg_handler_t *mh,
                             const flux_msg_t *msg,
@@ -422,6 +572,7 @@ static void queue_start_cb (flux_t *h,
     const char *stop_reason = NULL;
     int all;
     int nocheckpoint = 0;
+    struct queue *q;
 
     if (flux_request_unpack (msg,
                              NULL,
@@ -436,6 +587,40 @@ static void queue_start_cb (flux_t *h,
         errmsg = "Use --all to apply this command to all queues";
         errno = EINVAL;
         goto error;
+    }
+    /* An --all start that spans an exclusive queue would need one update
+     * per queue, each answered before the next starts.  Out of scope for
+     * now: require that an exclusive queue be started by name.
+     *
+     * A stop is let through, because instance shutdown stops all queues
+     * and must not fail.  The queues are stopped synchronously below and
+     * the exclusive set is released afterwards without waiting, which
+     * preserves the ordering that matters: no new job from an exclusive
+     * queue starts after its nodes are returned.
+     */
+    if (!name && start && queues_have_exclusive (qctx->queues)) {
+        errmsg = "--all is not supported with exclusive queues";
+        errno = EINVAL;
+        goto error;
+    }
+    /* An exclusive queue takes its nodes by updating the resource
+     * module's exclusive set, which is asynchronous.  A queue that is
+     * already in the requested state takes the synchronous path below,
+     * which is a no-op for it.
+     */
+    if (name
+        && (q = queues_lookup (qctx->queues, name, NULL))
+        && queue_is_exclusive (q)
+        && (start ? !queue_is_started (q) : queue_is_started (q))) {
+        if (queue_exclusive_update (qctx,
+                                    msg,
+                                    name,
+                                    start,
+                                    stop_reason,
+                                    nocheckpoint,
+                                    &errmsg) < 0)
+            goto error;
+        return;
     }
     if (start) {
         if (queues_start_queue (qctx->queues,
@@ -457,6 +642,8 @@ static void queue_start_cb (flux_t *h,
             errno = EINVAL;
             goto error;
         }
+        if (!name)
+            queue_exclusive_release_all (qctx);
     }
     if (flux_respond (h, msg, NULL) < 0)
         flux_log_error (h, "error responding to job-manager.queue-start");

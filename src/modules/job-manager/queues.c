@@ -1540,6 +1540,46 @@ bool queue_is_started (struct queue *q)
     return q->is_started;
 }
 
+json_t *queues_exclusive_names (struct queues *queues)
+{
+    json_t *names;
+    struct queue *q;
+
+    if (!(names = json_array ())) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    q = queues_first (queues);
+    while (q) {
+        if (q->is_exclusive) {
+            char prop[QUEUE_PROPERTY_MAX];
+            json_t *o;
+            (void)snprintf (prop, sizeof (prop), "+%s", q->name);
+            if (!(o = json_string (prop))
+                || json_array_append_new (names, o) < 0) {
+                json_decref (o);
+                json_decref (names);
+                errno = ENOMEM;
+                return NULL;
+            }
+        }
+        q = queues_next (queues);
+    }
+    return names;
+}
+
+bool queues_have_exclusive (struct queues *queues)
+{
+    struct queue *q = queues_first (queues);
+
+    while (q) {
+        if (q->is_exclusive)
+            return true;
+        q = queues_next (queues);
+    }
+    return false;
+}
+
 bool queue_is_runtime (struct queue *q)
 {
     return q->is_runtime;
