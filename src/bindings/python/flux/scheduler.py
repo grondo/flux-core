@@ -982,6 +982,7 @@ class Scheduler(BrokerModule):
                 "all": pool.to_dict(),
                 "allocated": pool.copy_allocated().to_dict(),
                 "down": pool.copy_down().to_dict(),
+                "exclusive": sorted(pool.get_exclusive()),
             }
             self.handle.respond(msg, resp)
         except Exception as exc:
@@ -1029,10 +1030,20 @@ class Scheduler(BrokerModule):
                 if not isinstance(ranks, str):
                     raise ValueError(f"property {name}: targets must be a string")
 
+            xadd = payload.get("exclusive-add") or []
+            xremove = payload.get("exclusive-remove") or []
+            for key, names in (("exclusive-add", xadd), ("exclusive-remove", xremove)):
+                if not isinstance(names, list) or not all(
+                    isinstance(name, str) for name in names
+                ):
+                    raise ValueError(f"{key} must be an array of strings")
+
             # Applied as one update: removals first, so moving ranks from
             # one queue to another works regardless of the order of the two
             # keys, and the pool is left untouched if any part fails.
             self._resources.update_properties(add, remove)
+            if xadd or xremove:
+                self._resources.update_exclusive(xadd, xremove)
 
             self.resource_update()
             self._request_schedule()
@@ -1189,6 +1200,13 @@ class Scheduler(BrokerModule):
         for key in [k for k in self.pool_kwargs if k not in known]:
             self.log.warning(f"pool: ignoring unknown option {key!r}")
             del self.pool_kwargs[key]
+
+        # The exclusive property set (E) is in the first response only, so
+        # that a scheduler that loads or reloads while a queue is started
+        # does not have to be told about it separately.
+        exclusive = data.get("exclusive")
+        if exclusive:
+            self._resources.update_exclusive(add=exclusive)
 
         # All resources start down; first update brings some up
         self._resources.mark_down("all")

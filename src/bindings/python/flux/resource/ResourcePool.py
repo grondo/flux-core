@@ -179,12 +179,27 @@ class ResourcePool:
         self.impl.update_properties(add, remove)
 
     def update_exclusive(self, add=(), remove=()) -> None:
-        """Add and remove names in the exclusive property set (E)."""
-        self.impl.update_exclusive(add, remove)
+        """Add and remove names in the exclusive property set (E).
+
+        Raises:
+            NotImplementedError: If this implementation does not support
+                exclusive properties.  The caller must fail the update
+                rather than silently ignore it.
+        """
+        try:
+            update = self.impl.update_exclusive
+        except AttributeError:
+            raise NotImplementedError(
+                f"{type(self.impl).__name__} does not support exclusive properties"
+            ) from None
+        update(add, remove)
 
     def get_exclusive(self) -> set:
-        """Return the exclusive property set (E)."""
-        return self.impl.get_exclusive()
+        """Return the exclusive property set (E), empty if unsupported."""
+        try:
+            return self.impl.get_exclusive()
+        except AttributeError:
+            return set()
 
     @property
     def expiration(self) -> float:
