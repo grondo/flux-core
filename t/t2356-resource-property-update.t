@@ -137,6 +137,19 @@ test_expect_success 'runtime properties are not committed to the KVS' '
 	test_cmp stored.exp stored.out
 '
 
+# The sched-status cache is built from the R the module serves, so it
+# must be invalidated when a runtime property changes, else a queue
+# added at runtime is invisible to flux-resource.
+test_expect_success 'flux resource list sees a runtime property' '
+	property_update "{\"property-add\":{\"+rl\":\"0-1\"}}" &&
+	flux resource list -s all -no "{propertiesx}" >rl.out &&
+	test_debug "cat rl.out" &&
+	grep "+rl" rl.out &&
+	property_update "{\"property-remove\":{\"+rl\":\"0-1\"}}" &&
+	flux resource list -s all -no "{propertiesx}" >rl2.out &&
+	test_must_fail grep "+rl" rl2.out
+'
+
 test_expect_success 'a property-update event is posted to the journal' '
 	flux resource eventlog >eventlog.out &&
 	test_debug "cat eventlog.out" &&
