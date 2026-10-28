@@ -227,6 +227,7 @@ TESTSCRIPTS = \
 	t2356-resource-property-update.t \
 	t2357-resource-exclusive.t \
 	t2358-runtime-queue-proto.t \
+	t2359-runtime-queue-reload.t \
 	t2400-job-exec-test.t \
 	t2401-job-exec-hello.t \
 	t2402-job-exec-dummy.t \
