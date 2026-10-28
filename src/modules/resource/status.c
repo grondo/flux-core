@@ -482,6 +482,9 @@ error:
  *   could be called in test from 'flux resource reload'
  * resource-update
  *   expiration has updated, invalidate cache
+ * property-update
+ *   a runtime property was added or removed, so the cached rlist and
+ *   R_all no longer carry the right properties
  * online, offline, drain, undrain
  *   invalidate R_down only
  */
@@ -504,7 +507,8 @@ static void reslog_cb (struct reslog *reslog,
     else if (status->shrink_down_ranks
         && streq (name, "offline"))
         invalidate_cache (&status->cache, true);
-    else if (streq (name, "resource-update"))
+    else if (streq (name, "resource-update")
+        || streq (name, "property-update"))
         invalidate_cache (&status->cache, true);
     else if (streq (name, "online")
         || streq (name, "offline")
