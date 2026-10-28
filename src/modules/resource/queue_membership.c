@@ -240,6 +240,119 @@ done:
     return rc;
 }
 
+/* Apply the runtime queues described by 'runtime' to 'R', in place, and
+ * collect the names of the started ones in 'exclusive'.
+ *
+ * Unlike queue_membership_apply(), a bad entry is not fatal: the key is
+ * state the job-manager wrote earlier, and the configuration may have
+ * changed under it since.  A conflicting or unresolvable entry is logged
+ * and skipped, so one stale runtime queue cannot keep the module from
+ * serving R.  The job-manager drops such an entry from the key on its
+ * next save.
+ */
+int queue_membership_apply_runtime (json_t *R,
+                                    json_t *runtime,
+                                    json_t *exclusive,
+                                    flux_t *h)
+{
+    json_t *queues;
+    json_t *props;
+    const char *name;
+    json_t *entry;
+    struct rlist *rl = NULL;
+    int version;
+    int rc = -1;
+
+    if (json_unpack (runtime,
+                     "{s:i s:o}",
+                     "version", &version,
+                     "queues", &queues) < 0
+        || !json_is_object (queues)) {
+        flux_log (h, LOG_ERR, "queues.runtime: malformed key, ignoring");
+        return 0;
+    }
+    if (version != 1) {
+        flux_log (h,
+                  LOG_ERR,
+                  "queues.runtime: unknown version %d, ignoring",
+                  version);
+        return 0;
+    }
+    if (json_object_size (queues) == 0)
+        return 0;
+
+    props = jpath_get (R, "execution.properties");
+    if (!(rl = R_to_rlist (R, NULL)))
+        return -1;
+    json_object_foreach (queues, name, entry) {
+        const char *hosts;
+        char *ranks;
+        char prop[QUEUE_PROPERTY_MAX];
+        int started = 0;
+        flux_error_t error;
+
+        if (json_unpack (entry,
+                         "{s:s s?b}",
+                         "hosts", &hosts,
+                         "started", &started) < 0) {
+            flux_log (h,
+                      LOG_ERR,
+                      "queues.runtime: queue %s: malformed entry, ignored",
+                      name);
+            continue;
+        }
+        (void)snprintf (prop, sizeof (prop), "+%s", name);
+        /* A property already in R belongs to a configured queue of the
+         * same name, which wins: the configuration is the authority.
+         */
+        if (props && json_object_get (props, prop)) {
+            flux_log (h,
+                      LOG_ERR,
+                      "queues.runtime: queue %s conflicts with a configured"
+                      " queue, ignored",
+                      name);
+            continue;
+        }
+        if (!(ranks = hosts_to_idset_string (rl, name, hosts, &error))) {
+            flux_log (h,
+                      LOG_ERR,
+                      "queues.runtime: queue %s: %s, ignored",
+                      name,
+                      error.text);
+            continue;
+        }
+        if (rlist_add_property (rl, &error, prop, ranks) < 0) {
+            flux_log (h,
+                      LOG_ERR,
+                      "queues.runtime: queue %s: %s, ignored",
+                      name,
+                      error.text);
+            free (ranks);
+            continue;
+        }
+        if (started && json_array_append_new (exclusive,
+                                              json_string (prop)) < 0) {
+            flux_log (h, LOG_ERR, "queues.runtime: out of memory");
+            free (ranks);
+            goto done;
+        }
+        flux_log (h,
+                  LOG_INFO,
+                  "queues.runtime: queue %s: %s on ranks %s%s",
+                  name,
+                  prop,
+                  ranks,
+                  started ? " (started, exclusive)" : "");
+        free (ranks);
+    }
+    if (splice_properties (R, rl, NULL) < 0)
+        goto done;
+    rc = 0;
+done:
+    rlist_destroy (rl);
+    return rc;
+}
+
 /* rlist_add_property() and rlist_remove_property() have this footprint.
  */
 typedef int (*rlist_property_f)(struct rlist *rl,

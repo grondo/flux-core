@@ -82,8 +82,8 @@ int queue_membership_apply (json_t *R,
  *
  * The result is derived state, exactly as for queue_membership_apply():
  * it belongs in the R this module serves, not the R committed to the KVS.
- * Runtime membership is not persisted here -- the job-manager is its
- * authority and re-pushes it after a reload.
+ * Runtime membership is not persisted here -- it is recovered from the
+ * queues.runtime key at load, see queue_membership_apply_runtime().
  *
  * Returns 0 on success, or -1 on error with 'errp' set.
  */
@@ -91,6 +91,31 @@ int queue_membership_update (json_t *R,
                              json_t *add,
                              json_t *remove,
                              flux_error_t *errp);
+
+/* Apply the runtime queues described by the 'queues.runtime' key object
+ * 'runtime' to 'R', in place, and append the membership property of each
+ * started queue to the 'exclusive' array.
+ *
+ * This is how a runtime queue survives a resource module reload: the
+ * job-manager writes the key before it changes anything, and this module
+ * reads it whenever it defines R. The derivation is identical to a
+ * configured 'hosts' queue -- property "+NAME" on the queue's hosts --
+ * so a runtime queue and a configured one are indistinguishable in the R
+ * the scheduler acquires.
+ *
+ * Unlike queue_membership_apply(), a bad entry is not fatal. The key may
+ * name a queue that now conflicts with a configured one, or hosts that no
+ * longer exist; each such entry is logged and skipped rather than failing
+ * the load. A configured queue of the same name always wins.
+ *
+ * The result is derived state and is never stored, as above.
+ *
+ * Returns 0 on success, or -1 on error with errno set.
+ */
+int queue_membership_apply_runtime (json_t *R,
+                                    json_t *runtime,
+                                    json_t *exclusive,
+                                    flux_t *h);
 
 /* Return a copy of 'R' that queue_membership_apply() may modify without
  * affecting the original. Only execution.properties is duplicated; the

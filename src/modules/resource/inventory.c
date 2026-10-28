@@ -206,6 +206,42 @@ out:
     return rc;
 }
 
+/* Apply the runtime queues recorded in the 'queues.runtime' KVS key to
+ * the R this module serves, and seed the exclusive set (E) from the ones
+ * that are started.
+ *
+ * The lookup is synchronous on purpose. This runs from inventory_put(),
+ * which is the single point every R passes through before it is served,
+ * including from an async continuation (R_watch_f). Doing it here rather
+ * than in a continuation of its own is what guarantees R is complete the
+ * first time anyone sees it.
+ *
+ * An absent key is the common case and not an error. A key that cannot
+ * be read or parsed is logged and ignored, so a damaged key cannot keep
+ * the module from coming up.
+ */
+static int runtime_queues_apply (struct inventory *inv)
+{
+    flux_t *h = inv->ctx->h;
+    flux_future_t *f;
+    json_t *runtime;
+    int rc = -1;
+
+    if (inv->ctx->rank != 0)
+        return 0;
+    if (!(f = flux_kvs_lookup (h, NULL, 0, "queues.runtime")))
+        return -1;
+    if (flux_kvs_lookup_get_unpack (f, "o", &runtime) < 0) {
+        if (errno != ENOENT)
+            flux_log_error (h, "queues.runtime: lookup failed, ignoring");
+        flux_future_destroy (f);
+        return 0;
+    }
+    rc = queue_membership_apply_runtime (inv->R, runtime, inv->exclusive, h);
+    flux_future_destroy (f);
+    return rc;
+}
+
 /* (rank 0) Commit resource.R to the KVS, then upon completion,
  * post resource-define event to resource.eventlog.
  */
@@ -261,6 +297,17 @@ int inventory_put (struct inventory *inv,
                                 flux_get_conf (inv->ctx->h),
                                 errp) < 0) {
         errno = EINVAL;
+        goto error;
+    }
+    /* Then the queues created at runtime, which the job-manager records
+     * in the KVS before it changes anything. Reading them here, rather
+     * than having the job-manager push them after a reload, means R is
+     * complete before it is served: there is no window in which the
+     * scheduler can acquire an R that is missing a runtime queue, and no
+     * dependence on the job-manager noticing that this module restarted.
+     */
+    if (runtime_queues_apply (inv) < 0) {
+        errprintf (errp, "error applying runtime queues: %s", strerror (errno));
         goto error;
     }
     if (inv->saved_expiration != 0.
