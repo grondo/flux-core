@@ -464,6 +464,40 @@ def idle(args):
         print(f"{pending} jobs")
 
 
+def add(args):
+    """Create a queue at runtime"""
+    options = {}
+    for arg in args.options:
+        key, _, value = arg.partition("=")
+        if not value:
+            raise ValueError(f"add: malformed option '{arg}', expected KEY=VALUE")
+        if key != "hosts":
+            raise ValueError(f"add: unsupported option '{key}'")
+        options[key] = value
+    if "hosts" not in options:
+        raise ValueError("add: hosts=HOSTLIST is required")
+
+    handle = flux.Flux()
+    payload = {"name": args.queue, "hosts": options["hosts"]}
+    future = handle.rpc("job-manager.queue-add", payload, nodeid=0)
+    try:
+        future.get()
+    except EnvironmentError:
+        LOGGER.error("add: {0}".format(future.error_string()))
+        sys.exit(1)
+
+
+def remove(args):
+    """Remove a queue created at runtime"""
+    handle = flux.Flux()
+    future = handle.rpc("job-manager.queue-remove", {"name": args.queue}, nodeid=0)
+    try:
+        future.get()
+    except EnvironmentError:
+        LOGGER.error("remove: {0}".format(future.error_string()))
+        sys.exit(1)
+
+
 class FSDAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         time = parse_fsd(values)
@@ -559,6 +593,20 @@ def main():
 
     for command in ("status", "enable", "disable", "start", "stop"):
         common_parser_create(subparsers, command)
+
+    add_parser = subparsers.add_parser("add")
+    add_parser.add_argument("queue", metavar="QUEUE", help="Queue to create")
+    add_parser.add_argument(
+        "options",
+        metavar="KEY=VALUE",
+        nargs="+",
+        help="Queue options, currently hosts=HOSTLIST only",
+    )
+    add_parser.set_defaults(func=add)
+
+    remove_parser = subparsers.add_parser("remove")
+    remove_parser.add_argument("queue", metavar="QUEUE", help="Queue to remove")
+    remove_parser.set_defaults(func=remove)
 
     drain_parser = subparsers.add_parser("drain")
     drain_parser.add_argument(
