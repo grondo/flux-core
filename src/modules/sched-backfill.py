@@ -29,6 +29,14 @@ head job fits.  This gives an accurate shadow time that respects topology
 and property constraints — it tightens the backfill window compared to
 count-based heuristics without over-constraining candidates.
 
+If the head job does not fit even after every running job has ended, no
+shadow time exists: it is waiting on something with no expiration, such
+as drained ranks or ranks held by a started exclusive queue.  There is
+then no reservation to protect, so both EASY constraints are dropped and
+any job that fits may run.  Otherwise one such job at the head of the
+queue would stop every job behind it, in every queue, for as long as the
+condition lasts.
+
 Load with::
 
     flux module load sched-backfill [queue-depth=N|unlimited] [log-level=LEVEL]
@@ -257,13 +265,27 @@ class BackfillScheduler(Scheduler):
         kept = [head]
         for job in sorted(self._queue[1:]):  # priority order among non-head jobs
             duration = job.resource_request.duration
-            # EASY constraint: backfill only if the job finishes before shadow.
-            can_backfill = (
-                shadow is not None and duration > 0.0 and now + duration <= shadow
-            )
+            if shadow is None:
+                # No reservation could be computed: the head job does not
+                # fit even once every running job has ended, so it is
+                # waiting on something with no end time -- drained ranks,
+                # or ranks held by a started exclusive queue.  There is no
+                # reservation to protect, so the EASY duration constraint
+                # does not apply and anything that fits may run.
+                #
+                # Without this, one such job at the head of the queue
+                # stops every job behind it, in every queue, for as long
+                # as the condition lasts.  That starves exactly the jobs
+                # an exclusive queue sets its nodes aside for.
+                can_backfill = True
+            else:
+                # EASY constraint: backfill only if the job finishes
+                # before the head job's reservation.
+                can_backfill = duration > 0.0 and now + duration <= shadow
             if can_backfill and self._try_alloc(job, backfill=head.jobid):
                 self.log.debug(
-                    f"backfill: {JobID(job.jobid).f58} (shadow={shadow:.0f})"
+                    f"backfill: {JobID(job.jobid).f58}"
+                    + (f" (shadow={shadow:.0f})" if shadow is not None else "")
                 )
             else:
                 kept.append(job)
