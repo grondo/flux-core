@@ -76,9 +76,13 @@ struct queue {
     bool is_exclusive;          /* while started, this queue's property is
                                  * in the resource module's exclusive set
                                  */
-    char *hosts;                /* hosts given at add time, needed to undo
-                                 * the property at remove time (runtime
-                                 * queues only)
+    char *targets;              /* ranks of a runtime queue, as an RFC 22
+                                 * idset, resolved at add time
+                                 */
+    char *nodelist;             /* the same ranks as an RFC 29 hostlist.
+                                 * Both forms are kept so that a restart
+                                 * which renumbers ranks can follow the
+                                 * hostnames, as drain does.
                                  */
     struct queues *queues;      /* back-pointer for notify */
 };
@@ -136,7 +140,8 @@ static void queue_free (struct queue *q)
         free (q->name);
         free (q->disable_reason);
         free (q->stop_reason);
-        free (q->hosts);
+        free (q->targets);
+        free (q->nodelist);
         free (q);
         errno = saved_errno;
     }
@@ -478,7 +483,8 @@ static struct queue *queue_dup (struct queues *queues, struct queue *q)
          && !(cpy->disable_reason = strdup (q->disable_reason)))
         || (q->stop_reason
             && !(cpy->stop_reason = strdup (q->stop_reason)))
-        || (q->hosts && !(cpy->hosts = strdup (q->hosts)))) {
+        || (q->targets && !(cpy->targets = strdup (q->targets)))
+        || (q->nodelist && !(cpy->nodelist = strdup (q->nodelist)))) {
         queue_free (cpy);
         errno = ENOMEM;
         return NULL;
@@ -1637,21 +1643,34 @@ bool queue_is_exclusive (struct queue *q)
     return q->is_exclusive;
 }
 
-const char *queue_hosts (struct queue *q)
+const char *queue_targets (struct queue *q)
 {
-    return q->hosts;
+    return q->targets;
 }
 
-int queue_set_runtime (struct queue *q, bool exclusive, const char *hosts)
+const char *queue_nodelist (struct queue *q)
 {
-    char *cpy = NULL;
+    return q->nodelist;
+}
 
-    if (hosts && !(cpy = strdup (hosts))) {
+int queue_set_runtime (struct queue *q,
+                       bool exclusive,
+                       const char *targets,
+                       const char *nodelist)
+{
+    char *tcpy = NULL;
+    char *ncpy = NULL;
+
+    if ((targets && !(tcpy = strdup (targets)))
+        || (nodelist && !(ncpy = strdup (nodelist)))) {
+        free (tcpy);
         errno = ENOMEM;
         return -1;
     }
-    free (q->hosts);
-    q->hosts = cpy;
+    free (q->targets);
+    free (q->nodelist);
+    q->targets = tcpy;
+    q->nodelist = ncpy;
     q->is_runtime = true;
     q->is_exclusive = exclusive;
     return 0;

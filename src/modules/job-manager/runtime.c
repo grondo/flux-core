@@ -14,15 +14,18 @@
  * queues.runtime:
  *
  *   {"version":1,
- *    "queues":{"dat":{"hosts":"node[2-3]",
+ *    "queues":{"dat":{"targets":"2-3",
+ *                     "nodelist":"node[2-3]",
  *                     "enabled":true,
  *                     "started":false,
  *                     "disable_reason":"...",
  *                     "stop_reason":"..."}}}
  *
- * 'hosts' is stored exactly as the admin gave it, a hostlist rather than
- * an idset, so that it means the same thing after a restart that
- * renumbers ranks.
+ * The admin's 'targets' -- an RFC 29 hostlist or an RFC 22 idset of
+ * ranks -- is resolved once at add time and recorded in both forms, as
+ * the resource module does for drain.  On replay the hostname wins
+ * where the two disagree, so a restart that renumbers ranks still
+ * selects the same nodes.
  *
  * The job-manager is the only writer.  The resource module reads the key
  * when it defines R and derives each queue's membership property from
@@ -58,15 +61,22 @@ json_t *runtime_queue_entry (struct queue *q,
                              int enabled,
                              const char *reason)
 {
-    const char *hosts = queue_hosts (q);
+    const char *targets = queue_targets (q);
+    const char *nodelist = queue_nodelist (q);
     json_t *entry;
 
     if (started < 0)
         started = queue_is_started (q) ? 1 : 0;
     if (enabled < 0)
         enabled = queue_is_enabled (q) ? 1 : 0;
-    if (!(entry = json_pack ("{s:s s:b s:b}",
-                             "hosts", hosts ? hosts : "",
+    /* Both forms are recorded, as drain does: 'targets' is the resolved
+     * idset of ranks and 'nodelist' the equivalent hostlist.  On replay
+     * the hostname wins where the two disagree, so a restart that
+     * renumbers ranks still selects the same nodes.
+     */
+    if (!(entry = json_pack ("{s:s s:s s:b s:b}",
+                             "targets", targets ? targets : "",
+                             "nodelist", nodelist ? nodelist : "",
                              "enabled", enabled,
                              "started", started))) {
         errno = ENOMEM;

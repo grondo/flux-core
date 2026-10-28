@@ -16,7 +16,10 @@ import sys
 
 import flux
 from flux.cli.argparse import FluxArgumentParser
+from flux.hostlist import Hostlist
+from flux.idset import IDset
 from flux.queue import QueueList
+from flux.resource import ResourceSet
 from flux.util import AltField, FilterActionSetUpdate, UtilConfig, parse_fsd
 
 
@@ -471,14 +474,39 @@ def add(args):
         key, _, value = arg.partition("=")
         if not value:
             raise ValueError(f"add: malformed option '{arg}', expected KEY=VALUE")
-        if key != "hosts":
+        if key != "targets":
             raise ValueError(f"add: unsupported option '{key}'")
         options[key] = value
-    if "hosts" not in options:
-        raise ValueError("add: hosts=HOSTLIST is required")
+    if "targets" not in options:
+        raise ValueError("add: targets=TARGETS is required")
 
     handle = flux.Flux()
-    payload = {"name": args.queue, "hosts": options["hosts"]}
+
+    #  Resolve targets to both an idset of ranks and the equivalent
+    #  hostlist, and send both. The job-manager records the pair so that
+    #  a restart which renumbers ranks can follow the hostnames, as
+    #  drain does. R is the authority here, not the broker 'hostlist'
+    #  attribute, which need not agree with it.
+    targets = options["targets"]
+    rset = ResourceSet(handle.rpc("resource.get", {}).get()["R"])
+    try:
+        ranks = IDset(targets)
+        nodelist = rset.copy_ranks(ranks).nodelist
+    except (ValueError, OSError):
+        #  Not an idset, so treat it as a hostlist and map back to ranks.
+        nodelist = Hostlist(targets)
+        ranks = IDset()
+        byhost = {host: rank for rank, host in zip(rset.ranks, rset.nodelist)}
+        for host in nodelist:
+            if host not in byhost:
+                raise ValueError(f"add: host {host} not found in resource set")
+            ranks.set(byhost[host])
+
+    payload = {
+        "name": args.queue,
+        "targets": str(ranks),
+        "nodelist": str(nodelist),
+    }
     future = handle.rpc("job-manager.queue-add", payload, nodeid=0)
     try:
         future.get()
@@ -600,7 +628,8 @@ def main():
         "options",
         metavar="KEY=VALUE",
         nargs="+",
-        help="Queue options, currently hosts=HOSTLIST only",
+        help="Queue options, currently targets=TARGETS only, where TARGETS"
+        " is an RFC 29 hostlist or an RFC 22 idset of ranks",
     )
     add_parser.set_defaults(func=add)
 

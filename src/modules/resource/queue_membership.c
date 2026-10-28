@@ -30,6 +30,7 @@
 
 #include "src/common/librlist/rlist.h"
 #include "src/common/libidset/idset.h"
+#include "src/common/libhostlist/hostlist.h"
 #include "src/common/libutil/errno_safe.h"
 #include "src/common/libutil/errprintf.h"
 #include "src/common/libutil/jpath.h"
@@ -45,15 +46,26 @@
 static char *hosts_to_idset_string (struct rlist *rl,
                                     const char *name,
                                     const char *hosts,
+                                    bool allow_idset,
                                     flux_error_t *errp)
 {
-    struct idset *ranks;
+    struct idset *ranks = NULL;
     char *s = NULL;
 
+    /* An RFC 22 idset of ranks is tried first where allowed, as
+     * resolve_targets() does for a property update, so that the two
+     * paths accept the same 'targets' spelling.  A hostlist cannot be
+     * mistaken for an idset: idset_decode() accepts only digits,
+     * commas, and dashes.
+     */
     if (streq (hosts, "all"))
         ranks = rlist_ranks (rl);
-    else
-        ranks = rlist_hosts_to_ranks (rl, hosts, errp);
+    else {
+        if (allow_idset)
+            ranks = idset_decode (hosts);
+        if (!ranks)
+            ranks = rlist_hosts_to_ranks (rl, hosts, errp);
+    }
     if (!ranks) {
         /* rlist_hosts_to_ranks() already set errp for the hostlist case. */
         if (streq (hosts, "all"))
@@ -223,7 +235,7 @@ int queue_membership_apply (json_t *R,
          */
         if (json_unpack (entry, "{s:s}", "hosts", &hosts) < 0)
             continue;
-        if (!(ranks = hosts_to_idset_string (rl, name, hosts, errp)))
+        if (!(ranks = hosts_to_idset_string (rl, name, hosts, false, errp)))
             goto done;
         (void)snprintf (prop, sizeof (prop), "+%s", name);
         if (rlist_add_property (rl, errp, prop, ranks) < 0) {
@@ -238,6 +250,74 @@ int queue_membership_apply (json_t *R,
 done:
     rlist_destroy (rl);
     return rc;
+}
+
+/* Resolve a runtime queue's recorded targets to an idset string of
+ * ranks.
+ *
+ * Both forms were recorded at add time: 'targets' is an idset of ranks
+ * and 'nodelist' the equivalent hostlist.  The rank is used as given,
+ * and corrected from the hostlist only where the host now at that rank
+ * differs, so that a restart which renumbers ranks still selects the
+ * same nodes.  This mirrors add_target() in the resource module's
+ * drain.c, and deliberately keeps the rank when hostnames are ambiguous
+ * (every rank sharing one hostname, as on a test instance) rather than
+ * collapsing every entry onto the first rank with that name.
+ */
+static char *runtime_targets_resolve (struct rlist *rl,
+                                      const char *name,
+                                      const char *targets,
+                                      const char *nodelist,
+                                      flux_t *h,
+                                      flux_error_t *errp)
+{
+    struct idset *ids = NULL;
+    struct idset *out = NULL;
+    struct hostlist *hl = NULL;
+    unsigned int rank;
+    int index = 0;
+    char *s = NULL;
+
+    if (!nodelist
+        || strlen (nodelist) == 0
+        || !(ids = idset_decode (targets)))
+        return hosts_to_idset_string (rl, name, targets, true, errp);
+    if (!(hl = hostlist_decode (nodelist))
+        || !(out = idset_create (0, IDSET_FLAG_AUTOGROW))) {
+        errprintf (errp, "queue %s: error decoding recorded targets", name);
+        goto done;
+    }
+    rank = idset_first (ids);
+    while (rank != IDSET_INVALID_ID) {
+        const char *host = hostlist_nth (hl, index++);
+        const char *now = flux_get_hostbyrank (h, rank);
+        unsigned int target = rank;
+        int nrank;
+
+        /* N.B. 'rank' must not be reassigned: it drives the iteration.
+         */
+        if (host && now && !streq (host, now)) {
+            if ((nrank = flux_get_rankbyhost (h, host)) >= 0)
+                target = nrank;
+        }
+        if (idset_set (out, target) < 0) {
+            errprintf (errp, "queue %s: idset_set: %s", name, strerror (errno));
+            goto done;
+        }
+        rank = idset_next (ids, rank);
+    }
+    if (idset_count (out) == 0) {
+        errprintf (errp, "queue %s: targets resolve to an empty set", name);
+        errno = EINVAL;
+        goto done;
+    }
+    if (!(s = idset_encode (out, IDSET_FLAG_RANGE)))
+        errprintf (errp, "queue %s: idset_encode: %s", name, strerror (errno));
+done:
+    idset_destroy (ids);
+    idset_destroy (out);
+    hostlist_destroy (hl);
+    return s;
 }
 
 /* Apply the runtime queues described by 'runtime' to 'R', in place, and
@@ -286,14 +366,16 @@ int queue_membership_apply_runtime (json_t *R,
         return -1;
     json_object_foreach (queues, name, entry) {
         const char *hosts;
+        const char *nodelist = NULL;
         char *ranks;
         char prop[QUEUE_PROPERTY_MAX];
         int started = 0;
         flux_error_t error;
 
         if (json_unpack (entry,
-                         "{s:s s?b}",
-                         "hosts", &hosts,
+                         "{s:s s?s s?b}",
+                         "targets", &hosts,
+                         "nodelist", &nodelist,
                          "started", &started) < 0) {
             flux_log (h,
                       LOG_ERR,
@@ -313,7 +395,12 @@ int queue_membership_apply_runtime (json_t *R,
                       name);
             continue;
         }
-        if (!(ranks = hosts_to_idset_string (rl, name, hosts, &error))) {
+        if (!(ranks = runtime_targets_resolve (rl,
+                                               name,
+                                               hosts,
+                                               nodelist,
+                                               h,
+                                               &error))) {
             flux_log (h,
                       LOG_ERR,
                       "queues.runtime: queue %s: %s, ignored",

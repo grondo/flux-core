@@ -56,7 +56,7 @@ test_expect_success 'write the in-instance helpers' '
 test_expect_success 'run 1: add dat and submit a job that cannot run yet' '
 	instance sh -c ". ./helpers.sh &&
 	    flux queue start --all &&
-	    flux queue add dat hosts=node[2-3] &&
+	    flux queue add dat targets=node[2-3] &&
 	    flux submit -q dat -N2 hostname >D1.id &&
 	    ! flux job wait-event -t 2 \$(cat D1.id) alloc" &&
 	test -s D1.id
@@ -180,8 +180,8 @@ test_expect_success 'run 11: the queue and its property stay gone' '
 #
 test_expect_success 'run 12: add a runtime queue' '
 	instance sh -c ". ./helpers.sh &&
-	    flux queue add dat hosts=node[2-3] &&
-	    test \"\$(key_get | jq -r .queues.dat.hosts)\" = \"node[2-3]\""
+	    flux queue add dat targets=node[2-3] &&
+	    test \"\$(key_get | jq -r .queues.dat.nodelist)\" = \"node[2-3]\""
 '
 
 test_expect_success 'run 13: a configured queue of the same name wins' '
@@ -199,7 +199,7 @@ test_expect_success 'run 14: the stale entry is dropped by the next save' '
 	flux start --setattr=statedir=$(pwd) $CONF \
 	    --conf=queues.dat.hosts=node[0-1] \
 	    sh -c ". ./helpers.sh &&
-	        flux queue add tmp hosts=node2 &&
+	        flux queue add tmp targets=node2 &&
 	        flux queue remove tmp &&
 	        key_get >key13.json" &&
 	test_debug "cat key13.json" &&
@@ -216,7 +216,7 @@ test_expect_success 'run 15: crash the broker after a checkpoint' '
 	    test_expect_code 137 flux start --setattr=statedir=$(pwd) $CONF \
 	        sh -c ". ./helpers.sh &&
 	            flux queue start --all &&
-	            flux queue add dat hosts=node[2-3] &&
+	            flux queue add dat targets=node[2-3] &&
 	            flux queue start dat &&
 	            flux submit -q dat -N1 $LONG true >D.id &&
 	            flux job wait-event -t 30 \$(cat D.id) start &&
@@ -246,7 +246,7 @@ test_expect_success 'run 17: crash the broker with no checkpoint' '
 	    test_expect_code 137 flux start --setattr=statedir=$(pwd) $CONF \
 	        sh -c ". ./helpers.sh &&
 	            flux queue start --all &&
-	            flux queue add dat hosts=node[2-3] &&
+	            flux queue add dat targets=node[2-3] &&
 	            flux submit -q dat -N1 $LONG true >D.id &&
 	            kill -9 \$(flux getattr broker.pid)")
 '
@@ -270,7 +270,7 @@ test_expect_success 'run 19: dump an instance with a started runtime queue' '
 	    flux start -Scontent.dump=dump.tar $CONF \
 	        sh -c ". ./helpers.sh &&
 	            flux queue start --all &&
-	            flux queue add dat hosts=node[2-3] &&
+	            flux queue add dat targets=node[2-3] &&
 	            flux queue start dat &&
 	            key_get >key_before.json") &&
 	test -f dumpdir/dump.tar

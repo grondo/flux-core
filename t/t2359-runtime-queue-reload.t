@@ -52,10 +52,11 @@ test_expect_success 'the donor queue covers all nodes' '
 # Case 1: the key follows each operation
 #
 test_expect_success 'add writes the key' '
-	flux queue add dat hosts=node[2-3] &&
+	flux queue add dat targets=node[2-3] &&
 	key_get >add.json &&
 	test_debug "cat add.json" &&
-	test "$(jq -r ".queues.dat.hosts" <add.json)" = "node[2-3]" &&
+	test "$(jq -r ".queues.dat.targets" <add.json)" = "2-3" &&
+	test "$(jq -r ".queues.dat.nodelist" <add.json)" = "node[2-3]" &&
 	test "$(jq -r ".queues.dat.enabled" <add.json)" = "true" &&
 	test "$(jq -r ".queues.dat.started" <add.json)" = "false" &&
 	test "$(jq -r ".version" <add.json)" = "1"
@@ -91,7 +92,7 @@ test_expect_success 'remove drops the entry' '
 # Case 2: a failed add leaves nothing behind
 #
 test_expect_success 'a failed add leaves no queue, key entry, or property' '
-	test_must_fail flux queue add bad hosts=nosuchhost &&
+	test_must_fail flux queue add bad targets=nosuchhost &&
 	test "$(key_get | jq -r ".queues.bad")" = "null" &&
 	flux queue list -no "{queue}" >badq.out &&
 	test_must_fail grep -x bad badq.out &&
@@ -110,8 +111,8 @@ test_expect_success 'a second operation in flight fails with EBUSY' '
 	import flux
 
 	h = flux.Flux()
-	f1 = h.rpc("job-manager.queue-add", {"name": "r1", "hosts": "node0"})
-	f2 = h.rpc("job-manager.queue-add", {"name": "r2", "hosts": "node1"})
+	f1 = h.rpc("job-manager.queue-add", {"name": "r1", "targets": "node0"})
+	f2 = h.rpc("job-manager.queue-add", {"name": "r2", "targets": "node1"})
 	ok = 0
 	busy = 0
 	for f in (f1, f2):
@@ -167,7 +168,7 @@ test_expect_success 'clean up the EBUSY queue' '
 #
 # B4 is therefore submitted last, by the case that checks it.
 scenario_setup() {
-	flux queue add dat hosts=node[2-3] &&
+	flux queue add dat targets=node[2-3] &&
 	D1=$(flux submit -q dat -N1 $LONG true) &&
 	echo $D1 >D1 &&
 	flux queue start dat &&
@@ -260,7 +261,7 @@ test_expect_success 'tear down the standard scenario' '
 # Case 6: resource and scheduler reload, dat stopped
 #
 test_expect_success 'a stopped queue reloads with an empty exclusive set' '
-	flux queue add dat hosts=node[2-3] &&
+	flux queue add dat targets=node[2-3] &&
 	flux module remove sched-simple &&
 	flux module reload resource monitor-force-up noverify &&
 	flux module load sched-simple &&
@@ -292,7 +293,7 @@ test_expect_success 'remove the stopped queue' '
 # Case 7-9: config reload
 #
 test_expect_success 'config reload keeps runtime queues' '
-	flux queue add dat hosts=node[2-3] &&
+	flux queue add dat targets=node[2-3] &&
 	flux queue start dat &&
 	key_get >before_conf.json &&
 	flux config load <<-EOT &&

@@ -216,8 +216,18 @@ bool queues_have_exclusive (struct queues *queues);
 json_t *queues_exclusive_names (struct queues *queues, bool started_only);
 bool queue_is_runtime (struct queue *q);
 bool queue_is_exclusive (struct queue *q);
-const char *queue_hosts (struct queue *q);
-int queue_set_runtime (struct queue *q, bool exclusive, const char *hosts);
+/* A runtime queue's targets are resolved once at add time and kept in
+ * both forms: an RFC 22 idset of ranks and the equivalent RFC 29
+ * hostlist.  Keeping both is what lets a restart that renumbers ranks
+ * follow the hostnames instead, as drain does (see decode_targets() in
+ * the resource module).
+ */
+const char *queue_targets (struct queue *q);
+const char *queue_nodelist (struct queue *q);
+int queue_set_runtime (struct queue *q,
+                       bool exclusive,
+                       const char *targets,
+                       const char *nodelist);
 
 /* Virtual queue (RFC 33) accessors.
  *

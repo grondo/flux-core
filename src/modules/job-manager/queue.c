@@ -61,6 +61,7 @@
 #include "src/common/libutil/jpath.h"
 #include "src/common/libutil/errno_safe.h"
 #include "src/common/libczmqcontainers/czmq_containers.h"
+#include "src/common/libidset/idset.h"
 #include "src/common/libfluxutil/conf_policy.h"
 #include "ccan/str/str.h"
 
@@ -414,7 +415,8 @@ struct queue_rpc {
     const flux_msg_t *msg;      // the request, answered when complete
     enum queue_op op;
     char *name;
-    char *hosts;
+    char *targets;   // resolved idset of ranks
+    char *nodelist;  // the same ranks as a hostlist
     char *reason;
     int nocheckpoint;
 };
@@ -442,7 +444,8 @@ static void queue_rpc_destroy (struct queue_rpc *qr)
             qr->qctx->busy = false;
         flux_msg_decref (qr->msg);
         free (qr->name);
-        free (qr->hosts);
+        free (qr->targets);
+        free (qr->nodelist);
         free (qr->reason);
         free (qr);
         errno = saved_errno;
@@ -453,7 +456,8 @@ static struct queue_rpc *queue_rpc_create (struct queue_ctx *qctx,
                                            const flux_msg_t *msg,
                                            enum queue_op op,
                                            const char *name,
-                                           const char *hosts,
+                                           const char *targets,
+                                           const char *nodelist,
                                            const char *reason)
 {
     struct queue_rpc *qr;
@@ -464,7 +468,8 @@ static struct queue_rpc *queue_rpc_create (struct queue_ctx *qctx,
     qr->msg = flux_msg_incref (msg);
     qr->op = op;
     if (!(qr->name = strdup (name))
-        || (hosts && !(qr->hosts = strdup (hosts)))
+        || (targets && !(qr->targets = strdup (targets)))
+        || (nodelist && !(qr->nodelist = strdup (nodelist)))
         || (reason && !(qr->reason = strdup (reason)))) {
         qr->qctx = NULL;  // not busy yet; do not clear the flag
         queue_rpc_destroy (qr);
@@ -525,7 +530,7 @@ static int queue_runtime_apply (struct queue_rpc *qr, flux_error_t *errp)
             /* queue_parse_config() derives requires = ["+NAME"] from
              * 'hosts', matching a configured hosts queue.
              */
-            if (!(config = json_pack ("{s:s}", "hosts", qr->hosts))) {
+            if (!(config = json_pack ("{s:s}", "hosts", qr->targets))) {
                 errprintf (errp, "out of memory");
                 errno = ENOMEM;
                 return -1;
@@ -534,7 +539,7 @@ static int queue_runtime_apply (struct queue_rpc *qr, flux_error_t *errp)
             json_decref (config);
             if (!q)
                 return -1;
-            if (queue_set_runtime (q, true, qr->hosts) < 0) {
+            if (queue_set_runtime (q, true, qr->targets, qr->nodelist) < 0) {
                 errprintf (errp, "out of memory");
                 (void)queues_remove (qctx->queues, qr->name, NULL);
                 return -1;
@@ -624,7 +629,7 @@ static int queue_runtime_property_update (struct queue_rpc *qr,
                                0,
                                0,
                                "{s:{s:s}}",
-                               "property-add", prop, qr->hosts);
+                               "property-add", prop, qr->targets);
             break;
         case QUEUE_OP_REMOVE:
             /* The property and the exclusive set entry go in one update,
@@ -636,7 +641,7 @@ static int queue_runtime_property_update (struct queue_rpc *qr,
                                0,
                                0,
                                "{s:{s:s} s:[s]}",
-                               "property-remove", prop, qr->hosts,
+                               "property-remove", prop, qr->targets,
                                "exclusive-remove", prop);
             break;
         case QUEUE_OP_START:
@@ -744,14 +749,18 @@ static void queue_add_cb (flux_t *h,
     const char *errmsg = NULL;
     const char *name;
     const char *hosts;
+    const char *nl = NULL;
+    char *targets = NULL;
+    char *nodelist = NULL;
     struct queue_rpc *qr = NULL;
     json_t *entry = NULL;
 
     if (flux_request_unpack (msg,
                              NULL,
-                             "{s:s s:s}",
+                             "{s:s s:s s?s}",
                              "name", &name,
-                             "hosts", &hosts) < 0)
+                             "targets", &hosts,
+                             "nodelist", &nl) < 0)
         goto error;
     if (queue_runtime_busy (qctx, &errmsg))
         goto error;
@@ -776,27 +785,49 @@ static void queue_add_cb (flux_t *h,
         goto error;
     }
     if (strlen (hosts) == 0) {
-        errmsg = "hosts must not be empty";
+        errmsg = "targets must not be empty";
         errno = EINVAL;
         goto error;
     }
-    if (!(entry = json_pack ("{s:s s:b s:b}",
-                             "hosts", hosts,
+    /* Both forms are recorded.  flux-queue(1) resolves them against R,
+     * which is the authority: the broker 'hostlist' attribute need not
+     * agree with R, and does not under fake resources.  A client that
+     * sends only 'targets' still works; the nodelist is then empty and
+     * the ranks are used as given.
+     */
+    if (!(targets = strdup (hosts))
+        || (nl && !(nodelist = strdup (nl)))) {
+        errno = ENOMEM;
+        goto error;
+    }
+    if (!(entry = json_pack ("{s:s s:s s:b s:b}",
+                             "targets", targets,
+                             "nodelist", nodelist ? nodelist : "",
                              "enabled", 1,
                              "started", 0))) {
         errno = ENOMEM;
         goto error;
     }
-    if (!(qr = queue_rpc_create (qctx, msg, QUEUE_OP_ADD, name, hosts, NULL)))
+    if (!(qr = queue_rpc_create (qctx,
+                                 msg,
+                                 QUEUE_OP_ADD,
+                                 name,
+                                 targets,
+                                 nodelist,
+                                 NULL)))
         goto error;
     if (queue_runtime_begin (qr, entry, NULL, &errmsg) < 0) {
         queue_rpc_destroy (qr);
         goto error;
     }
     json_decref (entry);
+    free (targets);
+    free (nodelist);
     return;
 error:
     json_decref (entry);
+    free (targets);
+    free (nodelist);
     if (flux_respond_error (h, msg, errno, errmsg) < 0)
         flux_log_error (h, "error responding to job-manager.queue-add");
 }
@@ -868,7 +899,8 @@ static void queue_remove_cb (flux_t *h,
                                  msg,
                                  QUEUE_OP_REMOVE,
                                  name,
-                                 queue_hosts (q),
+                                 queue_targets (q),
+                                 queue_nodelist (q),
                                  NULL)))
         goto error;
     if (queue_runtime_begin (qr, NULL, name, &errmsg) < 0) {
@@ -936,7 +968,8 @@ static void queue_enable_cb (flux_t *h,
                                      enable ? QUEUE_OP_ENABLE
                                             : QUEUE_OP_DISABLE,
                                      name,
-                                     queue_hosts (q),
+                                     queue_targets (q),
+                                 queue_nodelist (q),
                                      disable_reason))) {
             json_decref (entry);
             goto error;
@@ -1055,7 +1088,8 @@ static void queue_start_cb (flux_t *h,
                                      msg,
                                      start ? QUEUE_OP_START : QUEUE_OP_STOP,
                                      name,
-                                     queue_hosts (q),
+                                     queue_targets (q),
+                                 queue_nodelist (q),
                                      stop_reason))) {
             json_decref (entry);
             goto error;
@@ -1412,13 +1446,16 @@ int queue_ctx_restore_runtime (struct queue_ctx *qctx)
         const char *stop_reason = NULL;
         int enabled = 1;
         int started = 0;
+        const char *nodelist = NULL;
+        char *resolved = NULL;
         json_t *config;
         struct queue *q;
         flux_error_t error;
 
         if (json_unpack (entry,
-                         "{s:s s?b s?b s?s s?s}",
-                         "hosts", &hosts,
+                         "{s:s s?s s?b s?b s?s s?s}",
+                         "targets", &hosts,
+                         "nodelist", &nodelist,
                          "enabled", &enabled,
                          "started", &started,
                          "disable_reason", &disable_reason,
@@ -1442,7 +1479,27 @@ int queue_ctx_restore_runtime (struct queue_ctx *qctx)
                       name);
             continue;
         }
-        if (!(config = json_pack ("{s:s}", "hosts", hosts))) {
+        /* The hostnames win where the two forms disagree, so a restart
+         * that renumbered ranks still selects the same nodes.  This is
+         * what drain does on replay; see decode_targets() in the
+         * resource module.  An unresolvable nodelist falls back to the
+         * recorded ranks.
+         */
+        if (nodelist && strlen (nodelist) > 0) {
+            if ((resolved = flux_hostmap_lookup (h, nodelist, NULL)))
+                hosts = resolved;
+            else
+                flux_log (h,
+                          LOG_ERR,
+                          "runtime queue %s: nodelist %s does not resolve;"
+                          " using recorded ranks %s",
+                          name,
+                          nodelist,
+                          hosts);
+        }
+        config = json_pack ("{s:s}", "hosts", hosts);
+        if (!config) {
+            free (resolved);
             errno = ENOMEM;
             goto done;
         }
@@ -1454,10 +1511,14 @@ int queue_ctx_restore_runtime (struct queue_ctx *qctx)
                       "runtime queue %s: %s; ignored",
                       name,
                       error.text);
+            free (resolved);
             continue;
         }
-        if (queue_set_runtime (q, true, hosts) < 0)
+        if (queue_set_runtime (q, true, hosts, nodelist) < 0) {
+            free (resolved);
             goto done;
+        }
+        free (resolved);
         if (!enabled && queue_disable (q, disable_reason) < 0)
             goto done;
         /* nocheckpoint: the key is this queue's record, not the
@@ -1479,7 +1540,7 @@ int queue_ctx_restore_runtime (struct queue_ctx *qctx)
         }
         flux_log (h,
                   LOG_INFO,
-                  "restored runtime queue %s (hosts=%s, %s, %s)",
+                  "restored runtime queue %s (targets=%s, %s, %s)",
                   name,
                   hosts,
                   enabled ? "enabled" : "disabled",
