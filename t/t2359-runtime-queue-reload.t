@@ -153,10 +153,19 @@ test_expect_success 'clean up the EBUSY queue' '
 # N.B. B4, the donor job that cannot fit while dat is started, is NOT
 # submitted here.  sched-simple keeps one global FCFS queue and stops at
 # the first job it cannot allocate, so a pending B4 would block every
-# later job in every queue.  That is pre-existing scheduler behavior,
-# unrelated to the exclusive set: a -N1 job behind a -N4 job waiting on
-# another -N4 job is blocked the same way, with no runtime queue in
-# sight.  B4 is therefore submitted last, by the case that checks it.
+# later job in every queue.  That much is pre-existing scheduler
+# behavior, unrelated to the exclusive set: a -N1 job behind a -N4 job
+# waiting on another -N4 job is blocked the same way, with no runtime
+# queue in sight.
+#
+# sched-backfill does not rescue this either: it gates backfill on a
+# shadow time for the head job, and a head job that cannot fit even
+# after every running job ends never gets one.  Drained ranks produce
+# the same effect, so this is pre-existing EASY-backfill behavior
+# rather than something the exclusive set introduces.  See
+# RUNTIME-QUEUES-BACKFILL-FINDINGS.md.
+#
+# B4 is therefore submitted last, by the case that checks it.
 scenario_setup() {
 	flux queue add dat hosts=node[2-3] &&
 	D1=$(flux submit -q dat -N1 $LONG true) &&
