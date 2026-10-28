@@ -21,6 +21,13 @@ void queue_ctx_destroy (struct queue_ctx *qctx);
 json_t *queue_ctx_save (struct queue_ctx *qctx);
 int queue_ctx_restore (struct queue_ctx *qctx, int version, json_t *o);
 
+/* Recreate the runtime queues recorded in the queues.runtime KVS key.
+ * Called before jobs are loaded, so that a job restored into a runtime
+ * queue finds its queue present. Sends no property update: the resource
+ * module reads the same key when it defines R.
+ */
+int queue_ctx_restore_runtime (struct queue_ctx *qctx);
+
 /* Return the resolved effective queue configuration object (the "conf"
  * sub-object of the job-manager.queue-list response) for delivery to jobtap
  * plugins. The returned reference is borrowed (owned by the queues list

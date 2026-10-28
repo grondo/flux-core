@@ -493,6 +493,14 @@ int restart_from_kvs (struct job_manager *ctx)
     flux_error_t error;
     struct job_loader loader;
 
+    /* Recreate runtime queues first, so that a job loaded below into a
+     * runtime queue finds its queue already present.
+     */
+    if (queue_ctx_restore_runtime (ctx->queue) < 0) {
+        flux_log_error (ctx->h, "restart: error restoring runtime queues");
+        return -1;
+    }
+
     /* Load any active jobs present in the KVS at startup. The job-loader
      * pipelines the per-job KVS lookups: depthfirst_map walks the job
      * directory in jobid order and feeds each job to job_loader_add, which

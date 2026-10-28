@@ -1372,6 +1372,125 @@ static int restore_named_queues (struct queue_ctx *qctx)
     return 0;
 }
 
+/* Recreate the runtime queues recorded in the queues.runtime key.
+ *
+ * This runs before jobs are loaded, so that a job restored into a
+ * runtime queue finds its queue already present.
+ *
+ * No property update is sent here, and none is needed: the resource
+ * module reads the same key when it defines R, so the properties and
+ * the exclusive set are already in place.  A job-manager restart alone
+ * therefore does not touch R.
+ *
+ * N.B. the key is not rewritten here.  An entry skipped below stays in
+ * the key until the next save, which encodes only the queues that are
+ * in memory and so drops it then.
+ */
+int queue_ctx_restore_runtime (struct queue_ctx *qctx)
+{
+    flux_t *h = qctx->ctx->h;
+    json_t *queues = NULL;
+    const char *name;
+    json_t *entry;
+    int rc = -1;
+
+    if (runtime_queues_lookup (h, &queues) < 0)
+        return -1;
+    if (!queues)
+        return 0;
+    if (json_object_size (queues) > 0 && !queues_have_named (qctx->queues)) {
+        flux_log (h,
+                  LOG_ERR,
+                  "%s: runtime queues require named queues, ignoring all",
+                  RUNTIME_QUEUES_KEY);
+        rc = 0;
+        goto done;
+    }
+    json_object_foreach (queues, name, entry) {
+        const char *hosts;
+        const char *disable_reason = NULL;
+        const char *stop_reason = NULL;
+        int enabled = 1;
+        int started = 0;
+        json_t *config;
+        struct queue *q;
+        flux_error_t error;
+
+        if (json_unpack (entry,
+                         "{s:s s?b s?b s?s s?s}",
+                         "hosts", &hosts,
+                         "enabled", &enabled,
+                         "started", &started,
+                         "disable_reason", &disable_reason,
+                         "stop_reason", &stop_reason) < 0) {
+            flux_log (h,
+                      LOG_ERR,
+                      "%s: queue %s: malformed entry, ignored",
+                      RUNTIME_QUEUES_KEY,
+                      name);
+            continue;
+        }
+        /* The configuration is the authority: a configured queue of the
+         * same name wins, and the runtime one is dropped. The resource
+         * module makes the same choice for the property.
+         */
+        if (queues_lookup (qctx->queues, name, NULL)) {
+            flux_log (h,
+                      LOG_ERR,
+                      "runtime queue %s conflicts with configured queue;"
+                      " ignored",
+                      name);
+            continue;
+        }
+        if (!(config = json_pack ("{s:s}", "hosts", hosts))) {
+            errno = ENOMEM;
+            goto done;
+        }
+        q = queues_add (qctx->queues, name, config, &error);
+        json_decref (config);
+        if (!q) {
+            flux_log (h,
+                      LOG_ERR,
+                      "runtime queue %s: %s; ignored",
+                      name,
+                      error.text);
+            continue;
+        }
+        if (queue_set_runtime (q, true, hosts) < 0)
+            goto done;
+        if (!enabled && queue_disable (q, disable_reason) < 0)
+            goto done;
+        /* nocheckpoint: the key is this queue's record, not the
+         * job-manager checkpoint.
+         */
+        if (started) {
+            if (queues_start_queue (qctx->queues, name, 1, &error) < 0) {
+                flux_log (h, LOG_ERR, "runtime queue %s: %s", name, error.text);
+                goto done;
+            }
+        }
+        else if (queues_stop_queue (qctx->queues,
+                                    name,
+                                    stop_reason,
+                                    1,
+                                    &error) < 0) {
+            flux_log (h, LOG_ERR, "runtime queue %s: %s", name, error.text);
+            goto done;
+        }
+        flux_log (h,
+                  LOG_INFO,
+                  "restored runtime queue %s (hosts=%s, %s, %s)",
+                  name,
+                  hosts,
+                  enabled ? "enabled" : "disabled",
+                  started ? "started" : "stopped");
+    }
+    rc = 0;
+done:
+    json_decref (queues);
+    return rc;
+}
+
 int queue_ctx_restore (struct queue_ctx *qctx, int version, json_t *o)
 {
     /* Apply saved state via queues_restore, which does not fire change
