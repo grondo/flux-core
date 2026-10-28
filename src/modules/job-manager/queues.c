@@ -971,6 +971,25 @@ int queues_configure (struct queues *queues,
         if (queues_config_validate (config, error) < 0)
             return -1;
 
+        /* A runtime queue is not in the configuration, so it must not be
+         * removed below as one that disappeared from it. A configured
+         * queue of the same name would be ambiguous: the two would
+         * derive the same membership property from different hosts.
+         * Reject the configuration rather than resolve it silently.
+         */
+        json_object_foreach (config, name, value) {
+            struct queue *q;
+            if (queues->named
+                && (q = zhashx_lookup (queues->named, name))
+                && q->is_runtime) {
+                errprintf (error,
+                           "queue %s conflicts with runtime queue",
+                           name);
+                errno = EINVAL;
+                return -1;
+            }
+        }
+
         /* Remove queues that disappeared from config */
         if (queues->named) {
             zlistx_t *names;
@@ -980,7 +999,9 @@ int queues_configure (struct queues *queues,
             }
             name = zlistx_first (names);
             while (name) {
-                if (!json_object_get (config, name)) {
+                struct queue *q = zhashx_lookup (queues->named, name);
+                if (!json_object_get (config, name)
+                    && (!q || !q->is_runtime)) {
                     if (queue_remove_internal (queues, name) < 0) {
                         errprintf (error,
                                    "remove: %s: %s",
@@ -1048,6 +1069,15 @@ int queues_configure (struct queues *queues,
          * (a no-op if already anon)
          */
         if (queues->named) {
+            /* A runtime queue is a named queue, so anon mode would have
+             * to delete it. Refuse instead: the operator can remove the
+             * runtime queues first.
+             */
+            if (queues_have_runtime (queues)) {
+                errprintf (error, "runtime queues require named queues");
+                errno = EINVAL;
+                return -1;
+            }
             if (!queues_add (queues, NULL, NULL, error))
                 return -1;
         }
@@ -1571,6 +1601,18 @@ json_t *queues_exclusive_names (struct queues *queues, bool started_only)
         q = queues_next (queues);
     }
     return names;
+}
+
+bool queues_have_runtime (struct queues *queues)
+{
+    struct queue *q = queues_first (queues);
+
+    while (q) {
+        if (q->is_runtime)
+            return true;
+        q = queues_next (queues);
+    }
+    return false;
 }
 
 bool queues_have_exclusive (struct queues *queues)
