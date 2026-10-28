@@ -56,6 +56,14 @@ class FIFOScheduler(Scheduler):
     #: most 8 pending alloc requests, bounding scheduler queue size and
     #: annotation overhead.  Override at load time with ``queue-depth=unlimited``
     #: if the full pending queue must be visible (e.g. for policy decisions).
+    #:
+    #: N.B. this bound is global, not per Flux queue: the job-manager's
+    #: limit (mode=limited=N) counts alloc requests across every queue.
+    #: With several named queues, 8 pending requests may all belong to one
+    #: blocked queue, in which case the jobs of the others are never
+    #: presented and scheduling them independently (see :meth:`schedule`)
+    #: cannot help.  Load with ``queue-depth=unlimited`` where that
+    #: matters, such as an instance using runtime queues.
     queue_depth = 8
 
     def __init__(self, h, *args):
@@ -70,18 +78,37 @@ class FIFOScheduler(Scheduler):
     # ------------------------------------------------------------------
 
     def schedule(self):
-        """Drain the head of the queue as long as allocations succeed.
+        """Allocate pending jobs, scheduling each Flux queue independently.
 
-        Stops at the first job that cannot be allocated, preserving strict
-        FIFO ordering: a lower-priority job must never start before the job
-        ahead of it in the queue.
+        Jobs are considered in priority order.  When one cannot be
+        allocated, its queue is marked blocked for the rest of the pass
+        and the remaining jobs of that queue are skipped, but jobs in
+        other queues are still considered.  Order within a queue is
+        therefore strict FIFO -- a job never starts before one ahead of
+        it in the same queue -- while a queue that cannot run does not
+        hold up the others.
+
+        A job with no queue counts as a single anonymous queue, so an
+        instance with no named queues behaves exactly as before.
+
+        Scheduling the queues together rather than independently is what
+        made a pending job in one queue starve every other queue, which
+        matters most when an admin has set nodes aside for a group: the
+        reserved nodes sit idle while a job elsewhere blocks the pass.
         """
-        while self._queue:
-            job = self._queue[0]
+        blocked = set()
+        kept = []
+        for job in sorted(self._queue):  # priority order
+            queue = job.resource_request.queue
+            if queue in blocked:
+                kept.append(job)
+                continue
             if not self._try_alloc(job):
-                break  # head blocked — stop to preserve FIFO ordering
-            heapq.heappop(self._queue)
+                blocked.add(queue)
+                kept.append(job)
             yield
+        self._queue = kept
+        heapq.heapify(self._queue)
 
     def _sim_alloc(self, sim, jobid, rr, t_floor):
         """Allocate a resource request in a simulation pool.
