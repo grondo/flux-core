@@ -191,7 +191,7 @@ Exclusive configured queues use the start, stop, and restart rows only. Their pr
 - `hosts` is a hostlist. Exclusive queues may not overlap each other; this covers runtime queues and configured queues with `exclusive = true`.
 - Start and stop are manual (`flux queue start/stop`), or run by a script at the planned time.
 - There is no lookahead. Jobs that are still running on the nodes at start time keep running. The exclusive queue waits for them.
-- With an FCFS queue policy, a large donor job that cannot fit while an exclusive queue is started blocks its queue until that queue stops. Drained nodes cause the same behavior today.
+- With an FCFS queue policy, a large donor job that cannot fit while an exclusive queue is started blocks **every** queue until that queue stops, not just its own: under `sched-simple` a pending donor job starves the exclusive queue's own jobs while its nodes sit idle, which defeats the purpose of setting them aside. This is pre-existing `sched-simple` behavior -- two ordinary configured queues on disjoint nodes starve each other the same way, with no exclusive set involved -- but it makes the feature unusable there. Whether Fluxion's per-queue qmanager avoids it is the key open question. See `RUNTIME-QUEUES-STARVATION-FINDING.md`.
 - A reload of the resource module loses runtime properties and E. Reload the job-manager after it.
 - Fluxion sets match-policy for the whole instance, so `sched.*` can set the queue-policy and queue parameters only, not match-policy per queue.
 - No `flux queue update`, and no runtime virtual queues (`--parent`).
