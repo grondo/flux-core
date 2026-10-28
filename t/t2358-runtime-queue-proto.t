@@ -81,11 +81,29 @@ test_expect_success 'a donor job that needs all nodes is pending, not rejected' 
 	test_must_fail flux job wait-event -t 0.1 $id3 exception
 '
 
+# The access rule: membership of an exclusive queue is decided by the
+# job's queue, not by its constraint.  A job in the donor queue that
+# names the exclusive property is still kept off those nodes -- and the
+# frobnicator adds the donor queue's own property alongside it, so
+# trusting the constraint would admit it.
+test_expect_success 'a donor job naming the exclusive property is excluded' '
+	id5=$(flux submit -q batch --requires=+dat -N2 $RUN true) &&
+	echo $id5 >id5 &&
+	test_must_fail flux job wait-event -t 2 $id5 alloc &&
+	test_must_fail flux job wait-event -t 0.1 $id5 exception
+'
+
 test_expect_success 'flux queue stop returns the hosts' '
 	flux queue stop dat &&
 	flux cancel $(cat id2) &&
 	flux job status -v $(cat id3) &&
 	test "$(job_nodes $(cat id3))" = "node[0-3]"
+'
+
+# It waited rather than being rejected, so it runs once the queue stops.
+test_expect_success 'the excluded job runs after the queue is stopped' '
+	flux job status -v $(cat id5) &&
+	test "$(job_nodes $(cat id5))" = "node[2-3]"
 '
 
 test_expect_success 'flux queue remove removes the queue' '

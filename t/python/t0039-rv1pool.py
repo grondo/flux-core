@@ -31,6 +31,7 @@ def rr(
     exclusive=False,
     nnodes_max={},
     nslots_max={},
+    queue=None,
 ):
     """Convenience wrapper to build a ResourceRequest for tests.
 
@@ -59,6 +60,7 @@ def rr(
         constraint,
         exclusive,
         None,
+        queue,
     )
 
 
@@ -1070,18 +1072,40 @@ class TestRequires(unittest.TestCase):
 
 
 class TestRv1PoolExclusiveProperties(unittest.TestCase):
-    """The exclusive property set (E), as driven by sched.property-update."""
+    """The exclusive property set (E), as driven by sched.property-update.
+
+    Membership of an exclusive queue is decided by the job's queue, not
+    by its constraint.  The frobnicator adds a queue's own property to
+    every job it accepts, so a job in 'batch' that asks for '+dat' has
+    both in its constraint; trusting the constraint would let it onto
+    the reserved nodes.
+    """
 
     def setUp(self):
         self.pool = Rv1Pool(R_4x4)
         self.pool.update_properties({"batch": "0-3", "+dat": "2-3"})
         self.pool.update_exclusive(add=["+dat"])
 
-    def batch(self, nnodes):
-        return rr(nnodes, nnodes, 1, constraint={"properties": ["batch"]})
+    def batch(self, nnodes, requires=None):
+        """A job in queue 'batch', as the frobnicator would present it."""
+        props = ([requires] if requires else []) + ["batch"]
+        return rr(
+            nnodes,
+            nnodes,
+            1,
+            constraint={"properties": props},
+            queue="batch",
+        )
 
     def dat(self, nnodes):
-        return rr(nnodes, nnodes, 1, constraint={"properties": ["+dat"]})
+        """A job in queue 'dat'."""
+        return rr(
+            nnodes,
+            nnodes,
+            1,
+            constraint={"properties": ["+dat"]},
+            queue="dat",
+        )
 
     def test_initially_empty(self):
         self.assertEqual(Rv1Pool(R_4x4).get_exclusive(), set())
@@ -1100,13 +1124,39 @@ class TestRv1PoolExclusiveProperties(unittest.TestCase):
         a = self.pool.alloc(1, self.batch(2))
         self.assertEqual(sorted(a._ranks), [0, 1])
 
-    def test_opted_in_job_uses_exclusive_ranks(self):
+    def test_member_job_uses_exclusive_ranks(self):
         a = self.pool.alloc(1, self.dat(2))
         self.assertEqual(sorted(a._ranks), [2, 3])
 
-    def test_unconstrained_job_avoids_exclusive_ranks(self):
+    # The access rule: naming the property is not membership.  A job in
+    # another queue that asks for '+dat' is kept off those ranks, and
+    # since its constraint also pins it to them, it simply cannot run
+    # while 'dat' is started.  Under the old requires() rule it would
+    # have been allocated ranks 2-3.
+    def test_non_member_naming_the_property_is_excluded(self):
+        req = self.batch(2, requires="+dat")
+        with self.assertRaises(InsufficientResources):
+            self.pool.alloc(1, req)
+
+    # It waits rather than being rejected: the ranks come back when the
+    # exclusive queue is stopped.
+    def test_non_member_naming_the_property_waits(self):
+        req = self.batch(2, requires="+dat")
+        self.pool.check_feasibility(req)
+        with self.assertRaises(InsufficientResources):
+            self.pool.alloc(1, req)
+        self.pool.update_exclusive(remove=["+dat"])
+        a = self.pool.alloc(1, req)
+        self.assertEqual(sorted(a._ranks), [2, 3])
+
+    def test_job_with_no_queue_is_a_non_member(self):
         a = self.pool.alloc(1, rr(2, 2, 1))
         self.assertEqual(sorted(a._ranks), [0, 1])
+
+    def test_job_with_no_queue_naming_the_property_is_excluded(self):
+        req = rr(2, 2, 1, constraint={"properties": ["+dat"]})
+        with self.assertRaises(InsufficientResources):
+            self.pool.alloc(1, req)
 
     # A job that E excludes must wait, not be rejected: the ranks come
     # back when the exclusive queue is stopped.
@@ -1123,12 +1173,6 @@ class TestRv1PoolExclusiveProperties(unittest.TestCase):
 
     def test_exclusive_set_survives_copy(self):
         self.assertEqual(self.pool.copy().get_exclusive(), {"+dat"})
-
-    def test_or_constraint_does_not_opt_in(self):
-        # 'or' guarantees nothing, so this job may not use the +dat ranks.
-        c = {"or": [{"properties": ["+dat"]}, {"properties": ["batch"]}]}
-        a = self.pool.alloc(1, rr(2, 2, 1, constraint=c))
-        self.assertEqual(sorted(a._ranks), [0, 1])
 
 
 class TestRv1PoolRemoveRanks(unittest.TestCase):

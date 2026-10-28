@@ -41,18 +41,22 @@ test_expect_success 'a property-only update leaves the set alone' '
 	test_cmp add.exp other.out
 '
 
-# Rule 2: an exclusive rank is allocated only to a job that requires
-# every exclusive property that rank has.
-test_expect_success 'a job requiring the property lands on its ranks' '
-	rank=$(flux run -N1 --requires=+dat flux getattr rank) &&
-	test_debug "echo job ran on rank $rank" &&
-	test "$rank" -ge 2 && test "$rank" -le 3
-'
-
-test_expect_success 'a job that does not require it avoids those ranks' '
+# Rule 2: an exclusive rank is allocated only to a job in the queue
+# that owns it.  There are no named queues here, so no job is a member
+# and every rank in E is set aside -- including from a job that names
+# the property, which is the access rule.
+test_expect_success 'a job avoids the exclusive ranks' '
 	rank=$(flux run -N1 flux getattr rank) &&
 	test_debug "echo job ran on rank $rank" &&
 	test "$rank" -ge 0 && test "$rank" -le 1
+'
+
+test_expect_success 'naming the property does not grant access' '
+	id=$(flux submit -N1 --requires=+dat true) &&
+	test_must_fail flux job wait-event -t 2 $id alloc &&
+	test_must_fail flux job wait-event -t 0.1 $id exception &&
+	flux cancel $id &&
+	flux job wait-event -t 30 $id clean
 '
 
 # Rule 1: feasibility ignores E, so this job waits instead of being
