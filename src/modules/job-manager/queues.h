@@ -209,9 +209,10 @@ const char *queue_stop_reason (struct queue *q);
  */
 bool queues_have_exclusive (struct queues *queues);
 /* The membership property of every exclusive queue, as a new JSON array
- * of names (caller decrefs), or NULL on error with errno set.
+ * of names (caller decrefs), or NULL on error with errno set.  If
+ * 'started_only' is true, only started queues are included.
  */
-json_t *queues_exclusive_names (struct queues *queues);
+json_t *queues_exclusive_names (struct queues *queues, bool started_only);
 bool queue_is_runtime (struct queue *q);
 bool queue_is_exclusive (struct queue *q);
 const char *queue_hosts (struct queue *q);

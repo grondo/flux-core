@@ -1340,7 +1340,12 @@ json_t *queues_save (struct queues *queues)
     }
     q = queues_first (queues);
     while (q) {
-        if (save_one (a, q) < 0)
+        /* A runtime queue is deliberately absent from the checkpoint.
+         * Its only record is the queues.runtime KVS key, so that there
+         * is one writer and no way for two records to disagree about
+         * whether the queue exists. See runtime.c.
+         */
+        if (!q->is_runtime && save_one (a, q) < 0)
             goto error;
         q = queues_next (queues);
     }
@@ -1540,7 +1545,7 @@ bool queue_is_started (struct queue *q)
     return q->is_started;
 }
 
-json_t *queues_exclusive_names (struct queues *queues)
+json_t *queues_exclusive_names (struct queues *queues, bool started_only)
 {
     json_t *names;
     struct queue *q;
@@ -1551,7 +1556,7 @@ json_t *queues_exclusive_names (struct queues *queues)
     }
     q = queues_first (queues);
     while (q) {
-        if (q->is_exclusive) {
+        if (q->is_exclusive && (!started_only || q->is_started)) {
             char prop[QUEUE_PROPERTY_MAX];
             json_t *o;
             (void)snprintf (prop, sizeof (prop), "+%s", q->name);

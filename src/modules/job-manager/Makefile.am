@@ -68,6 +68,8 @@ libjob_manager_la_SOURCES = \
 	queues.c \
 	queue.h \
 	queue.c \
+	runtime.h \
+	runtime.c \
 	jobtap-internal.h \
 	jobtap.h \
 	jobtap.c \
