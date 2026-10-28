@@ -43,7 +43,6 @@ import time
 from collections.abc import Mapping
 from typing import Dict, List, Tuple
 
-from flux.constraint.requires import requires
 from flux.idset import IDset
 from flux.job import JobID
 from flux.resource.ResourcePoolImplementation import (
@@ -103,6 +102,7 @@ class ResourceRequest:
         "constraint",
         "exclusive",
         "jobspec",
+        "queue",
     )
 
     def __init__(
@@ -115,6 +115,7 @@ class ResourceRequest:
         constraint,
         exclusive,
         jobspec=None,
+        queue=None,
     ):
         self.node_count = node_count
         self.slot_count = slot_count
@@ -124,6 +125,9 @@ class ResourceRequest:
         self.constraint = constraint
         self.exclusive = exclusive
         self.jobspec = jobspec
+        #: The job's queue (attributes.system.queue), or None.  Decides
+        #: membership of an exclusive queue; see Rv1Pool.alloc().
+        self.queue = queue
 
     @property
     def nnodes(self):
@@ -224,6 +228,7 @@ class ResourceRequest:
         duration = system.get("duration", 0.0)
         # Use `or` to also coerce present but empty "constraints" to None
         constraint = system.get("constraints") or None
+        queue = system.get("queue")
 
         if state["nslots"] is None:
             raise ValueError("Unable to determine slot count")
@@ -245,6 +250,7 @@ class ResourceRequest:
             constraint,
             state["exclusive"],
             jobspec,
+            queue,
         )
 
     @property
@@ -300,8 +306,8 @@ class Rv1Pool(Rv1Set, ResourcePoolImplementation):
         self._job_state: Dict[int, Tuple[float, "Rv1Pool"]] = {}
 
         # _exclusive: the exclusive property set (E).  A rank holding one
-        # of these properties may only be allocated to a job that requires
-        # it.  See alloc().
+        # of these properties may only be allocated to a job in the queue
+        # that owns it.  See alloc().
         self._exclusive: set = set()
 
     # ------------------------------------------------------------------
@@ -464,9 +470,8 @@ class Rv1Pool(Rv1Set, ResourcePoolImplementation):
         """Add and remove names in the exclusive property set (E).
 
         A rank that has a property in E may only be allocated to a job
-        whose constraint requires that property.  Feasibility is not
-        affected: a job that cannot use those ranks waits rather than
-        being rejected.
+        in the queue that owns it.  Feasibility is not affected: a job
+        that cannot use those ranks waits rather than being rejected.
         """
         for name in list(add) + list(remove):
             if not isinstance(name, str):
@@ -481,6 +486,32 @@ class Rv1Pool(Rv1Set, ResourcePoolImplementation):
     def _rank_exclusive(self, rank: int) -> set:
         """Return the properties in E that *rank* has."""
         return {p for p in self._exclusive if rank in self._properties.get(p, ())}
+
+    @staticmethod
+    def _exclusive_owner(prop: str) -> str:
+        """Return the queue that owns exclusive property *prop*.
+
+        The owner of "+Q" is queue Q, which is the convention
+        queue_parse_config() uses to derive a 'hosts' queue's membership
+        property.
+
+        N.B. this is a prototype stand-in.  The exclusive set should
+        carry an explicit owner per entry, so that a queue whose
+        'requires' names some other property can still be exclusive.
+        """
+        return prop[1:] if prop.startswith("+") else prop
+
+    def _rank_allows_queue(self, rank: int, queue) -> bool:
+        """Return True if *queue*'s jobs may be allocated *rank*.
+
+        Every exclusive property the rank holds must belong to *queue*.
+        A job with no queue is a member of none, so it is kept off every
+        exclusive rank.
+        """
+        return all(
+            queue is not None and self._exclusive_owner(prop) == queue
+            for prop in self._rank_exclusive(rank)
+        )
 
     # ------------------------------------------------------------------
     # ResourcePoolImplementation — job lifecycle
@@ -689,17 +720,24 @@ class Rv1Pool(Rv1Set, ResourcePoolImplementation):
                 if self._matches_constraint(r, i, constraint)
             ]
 
-        # A rank holding an exclusive property is set aside for jobs that
-        # require it, much as a drained rank is set aside.  This is applied
-        # at allocation only: _check_feasibility() ignores E, so an excluded
-        # job raises InsufficientResources and waits rather than being
-        # rejected as unsatisfiable.
+        # A rank holding an exclusive property is set aside for the jobs
+        # of the queue that owns it, much as a drained rank is set aside.
+        #
+        # Membership is decided by the job's queue, not by its constraint:
+        # a job may name an exclusive property it is not entitled to (the
+        # frobnicator will even add one, since -q batch produces
+        # {"properties": ["+dat", "+batch"]} for --requires=+dat), so
+        # trusting the constraint would let any job onto the reserved
+        # nodes.
+        #
+        # Applied at allocation only: _check_feasibility() ignores E, so
+        # an excluded job raises InsufficientResources and waits rather
+        # than being rejected as unsatisfiable.
         if self._exclusive:
-            optin = requires(constraint)
             candidates = [
                 (r, i, fc, fg)
                 for r, i, fc, fg in candidates
-                if self._rank_exclusive(r) <= optin
+                if self._rank_allows_queue(r, request.queue)
             ]
 
         candidates = self._sort_candidates(candidates)
