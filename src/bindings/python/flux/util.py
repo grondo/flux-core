@@ -607,12 +607,23 @@ def empty_outputs():
 class UtilFormatter(Formatter):
     # pylint: disable=too-many-branches
 
+    #  Conversions handled below. Anything else is passed to the base class.
+    _conversions = frozenset(("d", "D", "F", "H", "P"))
+
     def convert_field(self, value, conv):
         """
         Flux utility-specific field conversions. Avoids the need
         to create many different format field names to represent
         different conversion types.
         """
+        #  The common case is no conversion at all, in which case the base
+        #  class returns the value unchanged for conv of None or "".  Return
+        #  early to avoid the str() below, which is only needed to detect an
+        #  empty value in the error paths of the conversions handled here.
+        if conv not in self._conversions:
+            if not conv:
+                return value
+            return super().convert_field(value, conv)
         orig_value = str(value)
         if conv == "d":
             # convert from float seconds since epoch to a datetime.
@@ -678,6 +689,11 @@ class UtilFormatter(Formatter):
         return value
 
     def format_field(self, value, spec):
+
+        #  Fast path for the common case of a spec with neither of the Flux
+        #  extensions, which avoids several str() calls on the value below:
+        if not spec.endswith(("+", "h")):
+            return super().format_field(value, spec)
 
         denote_truncation = False
         if spec.endswith("+"):
