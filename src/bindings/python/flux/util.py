@@ -1393,9 +1393,34 @@ class OutputFormat:
         #  Loop over all items that will be printed and capture the max
         #  width. This will later be used to either filter out the format
         #  field entirely, or update the width to the maximum value:
+        #  The formats in lst each contain exactly one field and no format
+        #  spec, so the generic string.Formatter.format() machinery can be
+        #  skipped the same way format() does, resolving the field with a
+        #  precomputed attrgetter and calling the convert_field() and
+        #  format_field() hooks directly.  This loop runs once per item per
+        #  entry, so it is worth avoiding.  Anything not handled falls back
+        #  to the generic path.
+        fast_ok = self._fast_path_ok(formatter)
+        for entry in lst:
+            field, _, conv = entry["fmt"][1:-1].partition("!")
+            #  Strip the "0." prefix, which refers to the item itself:
+            field = field[2:]
+            if fast_ok and field and all(x.isidentifier() for x in field.split(".")):
+                entry["getter"] = attrgetter(field)
+                entry["conv"] = conv
+            else:
+                entry["getter"] = None
+
         for item in items:
             for entry in lst:
-                result = formatter.format(entry["fmt"], item)
+                getter = entry["getter"]
+                if getter is None:
+                    result = formatter.format(entry["fmt"], item)
+                else:
+                    value = getter(item)
+                    if entry["conv"]:
+                        value = formatter.convert_field(value, entry["conv"])
+                    result = formatter.format_field(value, "")
                 width = 0 if result in empty else len(result)
                 if width > entry["maxwidth"]:
                     entry["maxwidth"] = width
