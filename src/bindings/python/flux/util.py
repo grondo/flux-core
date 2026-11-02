@@ -594,6 +594,10 @@ def fsd(secs):
     return strtmp
 
 
+# The result depends only on the local timezone, which is fixed for the
+# life of the process, but this is called once per formatted field with an
+# 'h' format suffix, so cache it.
+@functools.lru_cache(maxsize=1)
 def empty_outputs():
     localepoch = datetime.fromtimestamp(0.0).strftime("%FT%T")
     empty = ("", "0s", "0.0", "0:00:00", "1970-01-01T00:00:00", localepoch)
