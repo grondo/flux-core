@@ -64,8 +64,14 @@ def memoized_property(fget):
 
     @wraps(fget)
     def fget_memoized(self):
-        if not hasattr(self, attr_name):
-            setattr(self, attr_name, fget(self))
-        return getattr(self, attr_name)
+        #  Look the value up in the instance dict directly rather than via
+        #  hasattr()/getattr(), which is both slower and would consult the
+        #  class __getattr__() of classes that define one.
+        try:
+            return self.__dict__[attr_name]
+        except KeyError:
+            value = fget(self)
+            self.__dict__[attr_name] = value
+            return value
 
     return property(fget_memoized)
