@@ -348,6 +348,11 @@ class JobInfo:
         "waitstatus": "",
     }
 
+    #  Instance attributes are stored with a "_" prefix (see __init__()).
+    #  Precompute the prefixed form of defaults so __init__() can copy it
+    #  directly into the instance dict.
+    _prefixed_defaults = {"_" + key: value for key, value in defaults.items()}
+
     #  Other properties (used in to_dict())
     properties = (
         "id",
@@ -365,40 +370,44 @@ class JobInfo:
     )
 
     def __init__(self, info_resp):
-        #  Set defaults, then update with job-list.list response items:
-        combined_dict = self.defaults.copy()
-        combined_dict.update(info_resp)
+        #  Attributes are stored in the instance dict as self._{key} so they
+        #  can be found by __getattr__() and the memoized_property decorator.
+        #  Start from the pre-prefixed defaults, then update with the
+        #  job-list.list response items.  Building the dict directly and
+        #  assigning __dict__ in one shot is significantly faster than
+        #  calling setattr() per key, which matters when listing many
+        #  thousands of jobs.
+        attrs = self._prefixed_defaults.copy()
+        for key, value in info_resp.items():
+            attrs["_" + key] = value
 
         #  Cast jobid to JobID
-        combined_dict["id"] = JobID(combined_dict["id"])
+        attrs["_id"] = JobID(attrs["_id"])
 
         #  Rename "state" to "state_id" and "result" to "result_id"
         #  until returned state is a string:
-        if "state" in combined_dict:
-            combined_dict["state_id"] = combined_dict.pop("state")
+        if "_state" in attrs:
+            attrs["_state_id"] = attrs.pop("_state")
 
-        if "result" in combined_dict:
-            combined_dict["result_id"] = combined_dict.pop("result")
+        if "_result" in attrs:
+            attrs["_result_id"] = attrs.pop("_result")
 
         # Overwrite "exception" with our exception object
-        exc1 = combined_dict.get("exception_occurred", "")
-        exc2 = combined_dict.get("exception_severity", "")
-        exc3 = combined_dict.get("exception_type", "")
-        exc4 = combined_dict.get("exception_note", "")
-        combined_dict["exception"] = ExceptionInfo(exc1, exc2, exc3, exc4)
+        attrs["_exception"] = ExceptionInfo(
+            attrs.get("_exception_occurred", ""),
+            attrs.get("_exception_severity", ""),
+            attrs.get("_exception_type", ""),
+            attrs.get("_exception_note", ""),
+        )
 
-        aDict = combined_dict.get("annotations", {})
-        combined_dict["annotations"] = AnnotationsInfo(aDict)
-        combined_dict["sched"] = combined_dict["annotations"].sched
-        combined_dict["user"] = combined_dict["annotations"].user
+        annotations = AnnotationsInfo(attrs.get("_annotations", {}))
+        attrs["_annotations"] = annotations
+        attrs["_sched"] = annotations.sched
+        attrs["_user"] = annotations.user
 
-        deps = combined_dict.get("dependencies", [])
-        combined_dict["dependencies"] = DependencyList(deps)
+        attrs["_dependencies"] = DependencyList(attrs.get("_dependencies", []))
 
-        #  Set all keys as self._{key} to be found by getattr and
-        #   memoized_property decorator:
-        for key, value in combined_dict.items():
-            setattr(self, "_{0}".format(key), value)
+        self.__dict__ = attrs
 
     #  getattr method to return all non-computed values in job-list.list
     #   response by default. Avoids the need to wrap @property methods
@@ -408,7 +417,7 @@ class JobInfo:
         if attr.startswith("_"):
             raise AttributeError
         try:
-            return getattr(self, "_{0}".format(attr))
+            return getattr(self, "_" + attr)
         except (KeyError, AttributeError):
             raise AttributeError("invalid JobInfo attribute '{}'".format(attr))
 
