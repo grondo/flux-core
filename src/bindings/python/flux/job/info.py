@@ -400,12 +400,13 @@ class JobInfo:
             attrs.get("_exception_note", ""),
         )
 
-        annotations = AnnotationsInfo(attrs.get("_annotations", {}))
-        attrs["_annotations"] = annotations
-        attrs["_sched"] = annotations.sched
-        attrs["_user"] = annotations.user
-
-        attrs["_dependencies"] = DependencyList(attrs.get("_dependencies", []))
+        #  Stash the raw annotations and dependencies under separate keys.
+        #  The AnnotationsInfo and DependencyList wrappers are relatively
+        #  expensive to build and most output formats do not reference them,
+        #  so they are constructed on demand by the memoized properties
+        #  below.
+        attrs["_annotations_raw"] = attrs.pop("_annotations", {})
+        attrs["_dependencies_raw"] = attrs.pop("_dependencies", [])
 
         self.__dict__ = attrs
 
@@ -449,6 +450,22 @@ class JobInfo:
         if tleft < 0.0:
             return 0.0
         return tleft
+
+    @memoized_property
+    def annotations(self):
+        return AnnotationsInfo(self._annotations_raw)
+
+    @memoized_property
+    def sched(self):
+        return self.annotations.sched
+
+    @memoized_property
+    def user(self):
+        return self.annotations.user
+
+    @memoized_property
+    def dependencies(self):
+        return DependencyList(self._dependencies_raw)
 
     @memoized_property
     def uri(self):
