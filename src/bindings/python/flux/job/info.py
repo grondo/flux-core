@@ -39,10 +39,16 @@ except ImportError:
     from flux.compat36 import strsignal
 
 
+# The state/result to string conversions below call into libflux-core via
+# cffi, which is relatively expensive.  There are only a handful of distinct
+# (id, fmt) pairs, but a job listing may convert many thousands of jobs, so
+# cache the results.
+@functools.lru_cache(maxsize=None)
 def statetostr(stateid, fmt="L"):
     return raw.flux_job_statetostr(stateid, fmt).decode("utf-8")
 
 
+@functools.lru_cache(maxsize=None)
 def statetoemoji(stateid):
     statestr = raw.flux_job_statetostr(stateid, "S").decode("utf-8")
     if statestr == "N":
@@ -75,6 +81,7 @@ def statetoemoji(stateid):
     return emoji
 
 
+@functools.lru_cache(maxsize=None)
 def resulttostr(resultid, fmt="L"):
     # if result not returned, just return empty string back
     if resultid == "":
@@ -82,6 +89,7 @@ def resulttostr(resultid, fmt="L"):
     return raw.flux_job_resulttostr(resultid, fmt).decode("utf-8")
 
 
+@functools.lru_cache(maxsize=None)
 def resulttoemoji(resultid):
     if resultid != "":
         resultstr = raw.flux_job_resulttostr(resultid, "S").decode("utf-8")
@@ -115,6 +123,7 @@ def resulttoemoji(resultid):
 
 # Status is the job state when pending/running (i.e. not inactive)
 # status is the result when inactive
+@functools.lru_cache(maxsize=None)
 def statustostr(stateid, resultid, fmt="L"):
     if (stateid & flux.constants.FLUX_JOB_STATE_PENDING) or (
         stateid & flux.constants.FLUX_JOB_STATE_RUNNING
@@ -125,6 +134,7 @@ def statustostr(stateid, resultid, fmt="L"):
     return statusstr
 
 
+@functools.lru_cache(maxsize=None)
 def statustoemoji(stateid, resultid):
     if (stateid & flux.constants.FLUX_JOB_STATE_PENDING) or (
         stateid & flux.constants.FLUX_JOB_STATE_RUNNING
