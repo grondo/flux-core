@@ -1217,16 +1217,95 @@ class OutputFormat:
             prepend=self.prepend,
         )
 
+    @staticmethod
+    def _fast_path_ok(formatter):
+        """
+        Return True if ``formatter`` can be driven by the compiled fast
+        path in format().
+
+        The fast path resolves fields with operator.attrgetter and calls
+        convert_field() and format_field() directly, so it bypasses
+        get_field(), get_value() and check_unused_args().  A subclass that
+        overrides any of those expects them to be called, so fall back to
+        the generic vformat() path in that case.
+        """
+        return all(
+            getattr(type(formatter), name) is getattr(Formatter, name)
+            for name in ("get_field", "get_value", "check_unused_args")
+        )
+
+    def _compile(self):
+        """
+        Prepare the state used by format() and cache it, keyed on self.fmt.
+
+        Besides the formatter instance and format string, this attempts to
+        build a list of (literal, attrgetter, conversion, spec) tuples that
+        format() can walk directly, avoiding string.Formatter.vformat(),
+        which re-parses the format string and recurses per field on every
+        call.  This is only possible if every field is a plain dotted
+        attribute name and no format spec requires recursive expansion.
+        Otherwise the compiled form is None and format() uses vformat().
+
+        Only documented string.Formatter methods are used: parse() to split
+        the format, and the convert_field() and format_field() subclass
+        hooks to render each field.
+        """
+        self._formatter = self.formatter()
+        self._format_str = self.get_format(include_sort_prefix=False)
+        self._format_cache = self.fmt
+
+        if not self._fast_path_ok(self._formatter):
+            self._compiled = None
+            return
+
+        compiled = []
+        for text, field, spec, conv in Formatter().parse(self._format_str):
+            if field is None:
+                compiled.append((text, None, None, None))
+                continue
+            #  format() passes the object as the sole positional argument,
+            #  so every field is expected to have the form "0.attr[.attr]".
+            #  A spec containing "{" requires recursive expansion, and any
+            #  other field form may use indexing or auto-numbering.  None of
+            #  those are handled here.
+            name = field[2:] if field.startswith("0.") else None
+            if (
+                name is None
+                or "{" in spec
+                or not all(x.isidentifier() for x in name.split("."))
+            ):
+                self._compiled = None
+                return
+            compiled.append((text, attrgetter(name), conv, spec))
+        self._compiled = compiled
+
     def format(self, obj):
         """Format object with internal format"""
+        #  This is called once per item and a listing may contain many
+        #  thousands of items, so cache the compiled format.  It is derived
+        #  from self.fmt, so invalidate the cache if that changes.
+        if getattr(self, "_format_cache", None) != self.fmt:
+            self._compile()
+
+        formatter = self._formatter
+        compiled = self._compiled
         try:
-            retval = self.formatter().format(
-                self.get_format(include_sort_prefix=False), obj
-            )
+            if compiled is None:
+                return formatter.format(self._format_str, obj)
+            result = []
+            for text, getter, conv, spec in compiled:
+                if text:
+                    result.append(text)
+                if getter is None:
+                    continue
+                value = getter(obj)
+                if conv:
+                    value = formatter.convert_field(value, conv)
+                result.append(formatter.format_field(value, spec))
+            return "".join(result)
         except KeyError as exc:
             typestr = type(obj)
             raise KeyError(f"Invalid format field {exc} for {typestr}")
-        return retval
 
     def filter(self, items, no_header=False):
         """
