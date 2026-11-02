@@ -489,6 +489,8 @@ dist_check_SCRIPTS = \
 	scripts/pipe.py \
 	scripts/rreq-reader.py \
 	scripts/test-check-format-args.py \
+	scripts/gen-joblist.py \
+	scripts/jobs-perf-check.sh \
 	valgrind/valgrind-workload.sh \
 	valgrind/workload.d/job \
 	valgrind/workload.d/job-info \
