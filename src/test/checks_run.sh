@@ -93,7 +93,7 @@ inception_check() {
 	${MAKE} -j ${JOBS} check TESTS= || return 1
 	tests=$(t_tests)
 	test -n "$tests" || return 1
-	(cd t && ../src/cmd/flux start -s1 ./test-inception.sh $tests)
+	(cd t && ../src/cmd/flux start -s2 ./test-inception.sh $tests)
 }
 
 #  Return true if any tests under ./t were run
