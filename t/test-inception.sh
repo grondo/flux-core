@@ -54,6 +54,10 @@ RC=$?
 kill $PID
 wait
 
+# list the slowest tests
+echo "=== slowest tests ==="
+flux jobs -a --sort=-runtime -no "{runtime!F:>8h} {name}" | head -20
+
 # dump output of failed jobs to *.log
 for id in $(flux jobs -f failed -no {id}); do
     name=$(flux jobs -no {name} ${id})
