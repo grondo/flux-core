@@ -253,6 +253,30 @@ class BuildMatrix:
 
 matrix = BuildMatrix()
 
+#  Add the longest running builds first. GitHub generally starts jobs in
+#  matrix order, so with a limit on concurrent jobs this keeps the long
+#  builds from starting late.
+
+# coverage, split into shards to reduce wallclock time. Codecov merges
+# the reports, see after_n_builds in codecov.yml.
+COVERAGE_SHARDS = 2
+for i in range(1, COVERAGE_SHARDS + 1):
+    matrix.add_build(
+        name=f"coverage ({i}/{COVERAGE_SHARDS})",
+        image="bookworm",
+        coverage_flags="ci-basic",
+        coverage=True,
+        command_args=f"--shard={i}/{COVERAGE_SHARDS}",
+        args="--with-flux-security",
+    )
+
+# inception
+matrix.add_build(
+    name="inception",
+    image="fedora40",
+    command_args="--inception",
+)
+
 # Multi-arch builds, arm only builds on
 bookworm_platforms = deepcopy(DEFAULT_MULTIARCH_PLATFORMS)
 bookworm_platforms["linux/386"] = {
@@ -364,19 +388,6 @@ matrix.add_build(
     command_args="--workdir=/usr/src/" + "workdir/" * 15,
 )
 
-# coverage, split into shards to reduce wallclock time. Codecov merges
-# the reports, see after_n_builds in codecov.yml.
-COVERAGE_SHARDS = 2
-for i in range(1, COVERAGE_SHARDS + 1):
-    matrix.add_build(
-        name=f"coverage ({i}/{COVERAGE_SHARDS})",
-        image="bookworm",
-        coverage_flags="ci-basic",
-        coverage=True,
-        command_args=f"--shard={i}/{COVERAGE_SHARDS}",
-        args="--with-flux-security",
-    )
-
 # RHEL8 clone
 matrix.add_build(
     name="el8 - ascii",
@@ -404,13 +415,6 @@ matrix.add_build(
     coverage=True,
     command_args="--system",
     args="--with-flux-security",
-)
-
-# inception
-matrix.add_build(
-    name="inception",
-    image="fedora40",
-    command_args="--inception",
 )
 
 matrix.check_codecov_config("codecov.yml")
