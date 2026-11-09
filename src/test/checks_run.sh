@@ -62,6 +62,17 @@ JOBS=${JOBS:-2}
 MAKECMDS="${MAKE} -j ${JOBS}"
 CHECKCMDS="${MAKE} -j ${JOBS} ${DISTCHECK:+dist}check"
 
+#  Print the sharness tests to run in TESTS order, one per line.
+#  If SHARD is set, print only the tests in that shard.
+t_tests() {
+	if test -n "$SHARD"; then
+		make -s --no-print-directory -C t print-tests \
+			| ${WORKDIR}/src/test/shard-tests.sh "$SHARD"
+	else
+		make -s --no-print-directory -C t print-tests
+	fi
+}
+
 #  Run the src/ unit tests and shard $SHARD of the sharness tests.
 #  The unit tests are fast, so they run only in shard 1.
 sharded_check() {
@@ -70,10 +81,19 @@ sharded_check() {
 	if test "${SHARD%/*}" -eq 1; then
 		(cd src && ${MAKE} -j ${JOBS} check) || return 1
 	fi
-	tests=$(make -s --no-print-directory -C t print-tests \
-		| ${WORKDIR}/src/test/shard-tests.sh "$SHARD" | tr '\n' ' ')
+	tests=$(t_tests | tr '\n' ' ')
 	test -n "$tests" || return 1
 	(cd t && ${MAKE} -j ${JOBS} check TESTS="$tests")
+}
+
+#  Run the sharness tests as Flux jobs in TESTS order, so that
+#  long running tests start first.
+inception_check() {
+	local tests
+	${MAKE} -j ${JOBS} check TESTS= || return 1
+	tests=$(t_tests)
+	test -n "$tests" || return 1
+	(cd t && ../src/cmd/flux start -s1 ./test-inception.sh $tests)
 }
 
 #  Return true if any tests under ./t were run
@@ -189,9 +209,7 @@ elif test "$TEST_INSTALL" = "t"; then
 
 # Run checks as Flux jobs:
 elif test "$INCEPTION" = "t"; then
-	CHECKCMDS="make -j ${JOBS} check TESTS= && \
-	           cd t && ../src/cmd/flux start -s1 ./test-inception.sh && \
-	           cd .."
+	CHECKCMDS="inception_check"
 fi
 
 if test -n "$SHARD"; then
