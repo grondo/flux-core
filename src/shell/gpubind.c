@@ -27,6 +27,7 @@
 #include <flux/idset.h>
 
 #include "ccan/str/str.h"
+#include "src/common/librlist/rhwloc.h"
 
 #include "builtins.h"
 #include "affinity.h"
@@ -47,16 +48,19 @@ struct gpu_affinity {
  */
 static const struct gpu_env {
     const char *name;
+    unsigned int vendor;
     const char *envvar;
     const char *unset;
 } gpu_envs[] = {
     {
         .name = "nvidia",
+        .vendor = RHWLOC_PCI_VENDOR_NVIDIA,
         .envvar = "CUDA_VISIBLE_DEVICES",
         .unset = "ROCR_VISIBLE_DEVICES",
     },
     {
         .name = "amd",
+        .vendor = RHWLOC_PCI_VENDOR_AMD,
         .envvar = "ROCR_VISIBLE_DEVICES",
         .unset = "CUDA_VISIBLE_DEVICES",
     },
@@ -71,14 +75,51 @@ static const struct gpu_env *gpu_env_lookup (const char *name)
     return NULL;
 }
 
-static const struct gpu_env *gpu_env_get (flux_shell_t *shell)
+/*  Return the gpu_env entry for the vendor of all GPUs in the job shell
+ *  topology. Use nvidia if there are no GPUs, the vendor is unknown,
+ *  or GPUs come from different vendors.
+ *
+ *  If the job is assigned GPUs but their vendor is unknown, for example
+ *  because the job shell topology does not include them, the GPU runtime
+ *  may not use the selected variable. Warn the user in that case.
+ */
+static const struct gpu_env *gpu_env_detect (flux_shell_t *shell, int ngpus)
 {
-    const char *name = "nvidia";
+    const char *xml;
+    hwloc_topology_t topo;
+    unsigned int vendor = 0;
+
+    if (flux_shell_get_hwloc_xml (shell, &xml) == 0
+        && (topo = rhwloc_xml_topology_load (xml, RHWLOC_NO_RESTRICT))) {
+        vendor = rhwloc_gpu_vendor_id (topo);
+        hwloc_topology_destroy (topo);
+    }
+    for (int i = 0; i < sizeof (gpu_envs) / sizeof (gpu_envs[0]); i++) {
+        if (gpu_envs[i].vendor == vendor)
+            return &gpu_envs[i];
+    }
+    if (ngpus > 0)
+        shell_warn ("gpu-env=auto: GPU vendor unknown, using nvidia"
+                    " (set gpu-env to override)");
+    return gpu_env_lookup ("nvidia");
+}
+
+/*  Return the gpu_env entry selected by the gpu-env shell option.
+ *  ngpus is the number of GPUs assigned to this shell.
+ */
+static const struct gpu_env *gpu_env_get (flux_shell_t *shell, int ngpus)
+{
+    const char *name = "auto";
     const struct gpu_env *env;
 
     if (flux_shell_getopt_unpack (shell, "gpu-env", "s", &name) < 0) {
         shell_log_error ("gpu-env shell option must be a string");
         return NULL;
+    }
+    if (streq (name, "auto")) {
+        env = gpu_env_detect (shell, ngpus);
+        shell_debug ("gpu-env=auto: using %s", env->name);
+        return env;
     }
     if (!(env = gpu_env_lookup (name))) {
         shell_log_error ("invalid gpu-env shell option: %s", name);
@@ -286,8 +327,20 @@ static int gpubind_init (flux_plugin_t *p,
         return 0;
     }
 
-    if (!(env = gpu_env_get (shell)))
+    if (!(ctx = gpu_affinity_create (shell)))
         return -1;
+    if (flux_plugin_aux_set (p,
+                             NULL,
+                             ctx,
+                             (flux_free_f) gpu_affinity_destroy) < 0) {
+        shell_log_errno ("flux_plugin_aux_set");
+        gpu_affinity_destroy (ctx);
+        return -1;
+    }
+
+    if (!(env = gpu_env_get (shell, ctx->ngpus)))
+        return -1;
+    ctx->envvar = env->envvar;
 
     /*  Set default GPU visibility to an invalid id, -1, so that
      *  jobs which are not assigned any GPUs do not use GPUs which
@@ -297,18 +350,6 @@ static int gpubind_init (flux_plugin_t *p,
         return shell_log_errno ("failed to set %s", env->envvar);
     if (flux_shell_unsetenv (shell, env->unset) < 0 && errno != ENOENT)
         return shell_log_errno ("failed to unset %s", env->unset);
-
-    if (!(ctx = gpu_affinity_create (shell)))
-        return -1;
-    ctx->envvar = env->envvar;
-    if (flux_plugin_aux_set (p,
-                             NULL,
-                             ctx,
-                             (flux_free_f) gpu_affinity_destroy) < 0) {
-        shell_log_errno ("flux_plugin_aux_set");
-        gpu_affinity_destroy (ctx);
-        return -1;
-    }
 
     if (flux_plugin_add_handler (p,
                                  "task.init",
