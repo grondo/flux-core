@@ -1,6 +1,6 @@
 #!/bin/sh
 
-test_description='Test FLUX_HWLOC_XMLFILE with cpu-affinity=dry-run'
+test_description='Test FLUX_HWLOC_XMLFILE with shell affinity plugins'
 
 test -n "$FLUX_TESTS_LOGFILE" && set -- "$@" --logfile --debug
 
@@ -45,6 +45,29 @@ test_expect_success 'cpu-affinity=per-task works with FLUX_HWLOC_XMLFILE' '
 	test_debug "cat dry-run2.out" &&
 	grep "task 0: cpus: 0-3" dry-run2.out &&
 	grep "task 1: cpus: 4-7" dry-run2.out
+'
+# Print GPU visibility variables set for a job run under topology $1
+gpu_env_vars() {
+	FLUX_HWLOC_XMLFILE=${SHARNESS_TEST_SRCDIR}/hwloc-data/$1.xml \
+	FLUX_HWLOC_XMLFILE_NOT_THISSYSTEM=1 \
+	flux start flux run -n1 \
+		sh -c "echo CUDA=\${CUDA_VISIBLE_DEVICES-unset} \
+			ROCR=\${ROCR_VISIBLE_DEVICES-unset}"
+}
+test_expect_success 'gpu-env=auto selects amd for MI300A (SPX) topology' '
+	test "$(gpu_env_vars tuo.SPX)" = "CUDA=unset ROCR=-1"
+'
+test_expect_success 'gpu-env=auto selects amd for MI300A (CPX) topology' '
+	test "$(gpu_env_vars tuo.CPX)" = "CUDA=unset ROCR=-1"
+'
+test_expect_success 'gpu-env=auto selects amd for MI50 topology' '
+	test "$(gpu_env_vars corona)" = "CUDA=unset ROCR=-1"
+'
+test_expect_success 'gpu-env=auto selects nvidia for V100 topology' '
+	test "$(gpu_env_vars sierra)" = "CUDA=-1 ROCR=unset"
+'
+test_expect_success 'gpu-env=auto selects nvidia for H100 topology' '
+	test "$(gpu_env_vars ipa20)" = "CUDA=-1 ROCR=unset"
 '
 test_done
 
