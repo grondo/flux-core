@@ -73,6 +73,18 @@ hwloc_obj_t *rhwloc_gpu_objects (hwloc_topology_t topo, int *count_out);
  */
 char * rhwloc_gpu_idset_string (hwloc_topology_t topo);
 
+/*  PCI vendor ids returned by rhwloc_gpu_vendor_id().
+ *  AMD GPUs use the ATI vendor id, not the AMD CPU vendor id 0x1022.
+ */
+#define RHWLOC_PCI_VENDOR_AMD       0x1002
+#define RHWLOC_PCI_VENDOR_NVIDIA    0x10de
+
+/*  Return the PCI vendor id shared by all GPUs in topo, e.g.
+ *  RHWLOC_PCI_VENDOR_AMD. Returns 0 if there are no GPUs, if any GPU
+ *  has no PCI device, or if GPUs come from different vendors.
+ */
+unsigned int rhwloc_gpu_vendor_id (hwloc_topology_t topo);
+
 /*  Return the count of resource "type" in topology topo. Takes any
  *  hwloc obj type string or "gpu" for supported GPU types.
  */

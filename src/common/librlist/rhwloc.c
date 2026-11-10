@@ -528,6 +528,27 @@ char *rhwloc_gpu_idset_string (hwloc_topology_t topo)
     return result;
 }
 
+unsigned int rhwloc_gpu_vendor_id (hwloc_topology_t topo)
+{
+    hwloc_obj_t *gpus;
+    int count;
+    unsigned int vendor = 0;
+
+    if (!(gpus = rhwloc_gpu_objects (topo, &count)))
+        return 0;
+    for (int i = 0; i < count; i++) {
+        hwloc_obj_t pcidev = rhwloc_osdev_get_pcidev (gpus[i]);
+        if (!pcidev
+            || (i > 0 && pcidev->attr->pcidev.vendor_id != vendor)) {
+            vendor = 0;
+            break;
+        }
+        vendor = pcidev->attr->pcidev.vendor_id;
+    }
+    free (gpus);
+    return vendor;
+}
+
 int rhwloc_count_type (hwloc_topology_t topo, const char *name)
 {
     hwloc_obj_type_t type;
