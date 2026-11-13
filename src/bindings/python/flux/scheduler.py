@@ -306,6 +306,14 @@ class Scheduler(BrokerModule):
     #: default :class:`~flux.resource.ResourcePool`.
     pool_kwargs: dict = {}
 
+    #: If True, amend R with scheduler-specific data before constructing the
+    #: resource pool by calling the pool class's ``amend_R(R, topo_get)``
+    #: classmethod, where ``topo_get(rank)`` returns the hwloc XML for
+    #: ``rank``.  Any existing ``scheduling`` key in R, e.g. one inherited
+    #: from an enclosing instance, is replaced.  Set via the ``amend-r``
+    #: module argument.
+    amend_r: bool = False
+
     def __init_subclass__(cls, **kwargs):
         # Automatically call _reject_unknown_args() after each subclass
         # __init__ returns, so that unrecognised module arguments are caught
@@ -419,6 +427,10 @@ class Scheduler(BrokerModule):
                         f"log-level={name!r} is invalid: "
                         f"expected one of {', '.join(BrokerLogger.LEVEL_NAMES)}"
                     )
+            elif arg in ("amend-r", "amend-r=true"):
+                self.amend_r = True
+            elif arg == "amend-r=false":
+                self.amend_r = False
             elif arg.startswith("pool-class="):
                 uri = arg[len("pool-class=") :]
                 cls = _pool_class_from_uri(uri)
@@ -427,6 +439,9 @@ class Scheduler(BrokerModule):
                 self.pool_class = cls
             else:
                 self._pending_args.append(arg)
+        if self.amend_r and not hasattr(self.pool_class, "amend_R"):
+            name = getattr(self.pool_class, "__name__", None)
+            raise ValueError(f"amend-r: pool-class={name} does not support amend-r")
 
     def _reject_unknown_args(self):
         """Raise ValueError if any unrecognized module arguments remain.
@@ -437,7 +452,8 @@ class Scheduler(BrokerModule):
         if self._pending_args:
             raise ValueError(
                 f"unknown argument {self._pending_args[0]!r}: "
-                f"built-in options are queue-depth, log-level, pool-class"
+                f"built-in options are queue-depth, log-level, pool-class, "
+                f"amend-r"
             )
 
     # ------------------------------------------------------------------
@@ -1163,6 +1179,25 @@ class Scheduler(BrokerModule):
                     return pool_cls(R, log=self.log, **self.pool_kwargs)
         return ResourcePool(R, log=self.log, **self.pool_kwargs)
 
+    def _topo_get(self, rank):
+        """Return hwloc XML for broker *rank* via ``resource.topo-get``."""
+        try:
+            return self.handle.rpc("resource.topo-get", nodeid=rank).get_str()
+        except OSError as exc:
+            raise OSError(f"resource.topo-get rank {rank}: {exc}") from exc
+
+    def _amend_R(self, R):
+        """Amend R via :attr:`pool_class` ``amend_R()`` (see :attr:`amend_r`)."""
+        if isinstance(R, str):
+            R = json.loads(R)
+        # Replace any existing scheduling key: one inherited from an enclosing
+        # instance uses that instance's resource IDs, which may not match
+        # this instance's renumbered R.
+        R.pop("scheduling", None)
+        R = self.pool_class.amend_R(R, self._topo_get)
+        self.log.debug(f"amend-r: {json.dumps(R.get('scheduling'))}")
+        return R
+
     def _acquire_resources(self):
         """Issue resource.acquire, process first response synchronously."""
         f = self.handle.rpc("resource.acquire", flags=FLUX_RPC_STREAMING)
@@ -1175,6 +1210,8 @@ class Scheduler(BrokerModule):
         R = data.get("resources")
         if R is None:
             raise OSError("resource.acquire: missing 'resources' field")
+        if self.amend_r:
+            R = self._amend_R(R)
         self._resources = self._make_pool(R)
 
         # Warn once about any pool_kwargs not recognised by this pool
