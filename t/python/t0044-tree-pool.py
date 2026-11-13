@@ -13,6 +13,7 @@
 
 import copy
 import json
+import os
 import unittest
 
 import subflux  # noqa: F401 - configures PYTHONPATH for flux imports
@@ -147,6 +148,74 @@ def container_exclusive_jobspec(
         ],
         "attributes": attributes,
     }
+
+
+def hwloc_xml(name):
+    """Return contents of t/hwloc-data/{name}.xml."""
+    with open(os.path.join(subflux.srcdir, "t", "hwloc-data", f"{name}.xml")) as fp:
+        return fp.read()
+
+
+class TestTreePoolAmendR(unittest.TestCase):
+    """TreePool.amend_R(): derive scheduling.children via a topo_get callback."""
+
+    def amend(self, R, xml_by_rank):
+        calls = []
+
+        def topo_get(rank):
+            calls.append(rank)
+            return hwloc_xml(xml_by_rank[rank])
+
+        return TreePool.amend_R(R, topo_get), calls
+
+    def test_homogeneous(self):
+        R = {
+            "version": 1,
+            "execution": {"R_lite": [{"rank": "0-3", "children": {"core": "0-43"}}]},
+        }
+        R, calls = self.amend(R, {0: "sierra"})
+        self.assertEqual(calls, [0])
+        sched = R["scheduling"]
+        self.assertEqual(sched["writer"], "TreePool")
+        self.assertEqual(len(sched["children"]), 1)
+        self.assertEqual(sched["children"][0]["ranks"], "0-3")
+        sockets = sched["children"][0]["topo"]["socket"]
+        self.assertEqual([x["gpus"] for x in sockets], ["0-1", "2-3"])
+        TreePool(R)
+
+    def test_heterogeneous(self):
+        """One topo_get call per R_lite entry, one children entry each."""
+        R = {
+            "version": 1,
+            "execution": {
+                "R_lite": [
+                    {"rank": "0-1", "children": {"core": "0-43", "gpu": "0-3"}},
+                    {"rank": "2-3", "children": {"core": "0-47", "gpu": "0-7"}},
+                ]
+            },
+        }
+        R, calls = self.amend(R, {0: "sierra", 2: "corona"})
+        self.assertEqual(calls, [0, 2])
+        children = R["scheduling"]["children"]
+        self.assertEqual([c["ranks"] for c in children], ["0-1", "2-3"])
+        self.assertEqual(children[1]["topo"]["socket"][1]["gpus"], "4-7")
+        pool = TreePool(R)
+        # 8 GPUs per slot fits only the corona ranks
+        alloc = pool.alloc(1, rr(nslots=1, slot_size=1, gpu_per_slot=8))
+        self.assertEqual(alloc.dumps(), "rank2/core0,gpu[0-7]")
+
+    def test_no_ranks(self):
+        R = {"version": 1, "execution": {"R_lite": []}}
+        with self.assertRaises(ValueError):
+            self.amend(R, {})
+
+    def test_missing_scheduling_hint(self):
+        R = {
+            "version": 1,
+            "execution": {"R_lite": [{"rank": "0", "children": {"core": "0-3"}}]},
+        }
+        with self.assertRaisesRegex(ValueError, "amend-r"):
+            TreePool(R)
 
 
 class TestTreePoolConstruct(unittest.TestCase):
