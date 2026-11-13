@@ -354,12 +354,12 @@ class _TreePoolV1(Rv1Pool):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if self.scheduling is None:
-            raise ValueError("TreePool requires R.scheduling")
+            raise ValueError("TreePool requires R.scheduling (try amend-r)")
         scheduling = dict(self.scheduling)
 
         children = scheduling.get("children")
         if not children:
-            raise ValueError("TreePool requires scheduling.children")
+            raise ValueError("TreePool requires scheduling.children (try amend-r)")
 
         raw_groups = _parse_children(children)
         if not raw_groups:
@@ -833,8 +833,50 @@ class TreePool(ResourcePool):
             R = impl_class(R, log=log, **kwargs)
         super().__init__(R)
 
+    @classmethod
+    def amend_R(cls, R, topo_get):
+        """Add ``R.scheduling`` with TreePool topology derived from hwloc.
+
+        hwloc XML is fetched for the first rank of each ``R_lite`` entry,
+        and applied to all ranks in that entry, so the cost scales with the
+        number of distinct node shapes rather than the number of ranks.
+        *topo_get* is a callable taking a rank and returning the hwloc XML
+        for that rank, e.g. via ``resource.topo-get``.
+
+        Returns the amended R.  Raises :exc:`ValueError` if R contains no
+        ranks.
+        """
+        children = []
+        for entry in R.get("execution", {}).get("R_lite", []):
+            rank = IDset(entry["rank"]).first()
+            topo = _topo_from_xml(topo_get(rank))
+            children.append({"ranks": entry["rank"], "topo": topo})
+        if not children:
+            raise ValueError("TreePool: R contains no ranks")
+        R["scheduling"] = {"writer": "TreePool", "children": children}
+        return R
+
 
 pool_class = TreePool
+
+
+def _topo_from_xml(hwloc_xml):
+    """Convert hwloc XML to a TreePool topology object."""
+    from _flux._rhwloc_treepool import ffi, lib
+
+    errp = ffi.new("flux_error_t *")
+    json_str_ptr = lib.rhwloc_treepool_topo_to_json(hwloc_xml.encode("utf-8"), errp)
+
+    if json_str_ptr == ffi.NULL:
+        errmsg = (
+            ffi.string(errp.text).decode("utf-8") if errp.text[0] else "unknown error"
+        )
+        raise RuntimeError(f"rhwloc_treepool_topo_to_json failed: {errmsg}")
+
+    try:
+        return json.loads(ffi.string(json_str_ptr).decode("utf-8"))
+    finally:
+        lib.free(json_str_ptr)
 
 
 def amend(R, hwloc_xml=None):
@@ -861,24 +903,7 @@ def amend(R, hwloc_xml=None):
     if not ranks:
         return R
 
-    from _flux._rhwloc_treepool import ffi, lib
-
-    # Convert XML to TreePool topology JSON
-    xml_bytes = hwloc_xml.encode("utf-8")
-    errp = ffi.new("flux_error_t *")
-    json_str_ptr = lib.rhwloc_treepool_topo_to_json(xml_bytes, errp)
-
-    if json_str_ptr == ffi.NULL:
-        errmsg = (
-            ffi.string(errp.text).decode("utf-8") if errp.text[0] else "unknown error"
-        )
-        raise RuntimeError(f"rhwloc_treepool_topo_to_json failed: {errmsg}")
-
-    try:
-        json_str = ffi.string(json_str_ptr).decode("utf-8")
-        topo_dict = json.loads(json_str)
-    finally:
-        lib.free(json_str_ptr)
+    topo_dict = _topo_from_xml(hwloc_xml)
 
     # Build scheduling object with writer and children
     R["scheduling"] = {
