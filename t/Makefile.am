@@ -219,6 +219,7 @@ TESTSCRIPTS = \
 	t2320-sched-treepool.t \
 	t2321-sched-treepool-tva.t \
 	t2322-sched-treepool-tvb.t \
+	t2323-sched-amend-r.t \
 	t2350-resource-list.t \
 	t2351-resource-status-input.t \
 	t2352-resource-cmd-config.t \
