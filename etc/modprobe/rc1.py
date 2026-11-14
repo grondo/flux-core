@@ -17,6 +17,8 @@ from subprocess import Popen
 import flux.kvs
 import flux.subprocess as sp
 from flux.modprobe import run_all_rc_scripts, task
+from flux.resource import ResourceJournalConsumer
+from flux.resource.amend import load_amender
 from flux.testing.fake_resources import InjectFakeResources
 
 
@@ -257,6 +259,41 @@ def fake_resources(context):
     ).install(context.handle)
 
     context.setopt("resource", "monitor-force-up noverify", overwrite=True)
+
+
+@task(
+    "amend-R",
+    ranks="0",
+    after=["resource"],
+    before=["sched", "feasibility"],
+    needs_config=["sched.amend-r"],
+)
+def amend_R(context):
+    """
+    Amend R with scheduler-specific data using the amender named by
+    sched.amend-r before the scheduler is loaded. Any existing
+    scheduling key, such as one inherited from the enclosing instance,
+    is replaced. Nodes are assumed to be homogeneous, so the hwloc XML
+    of rank 0 is passed to the amender.
+    """
+    amend = load_amender(context.conf_get("sched.amend-r"))
+
+    #  The resource-define event carries R once it is defined, whatever
+    #  its source.
+    consumer = ResourceJournalConsumer(context.handle).start()
+    while True:
+        event = consumer.poll()
+        if event.name == "resource-define":
+            R = event.R
+            break
+    consumer.stop()
+
+    R.pop("scheduling", None)
+    xml = context.rpc("resource.topo-get", nodeid=0).get_str()
+    R = amend(R, hwloc_xml=xml)
+    if R.get("scheduling") is None:
+        raise RuntimeError("amend-r: amender did not set R.scheduling")
+    context.rpc("resource.amend", {"scheduling": R["scheduling"]}, nodeid=0).get()
 
 
 @task("run-all-rc1", after=["*"])
