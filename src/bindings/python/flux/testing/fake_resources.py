@@ -19,16 +19,14 @@ resource module loads so the synthetic R is in place at broker startup.
 """
 
 import abc
-import importlib
 import json
-import os
 import subprocess
 import sys
 
 import flux
 import flux.kvs
 from flux.idset import IDset
-from flux.importer import import_path
+from flux.resource.amend import load_amender
 
 
 def _stderr_log(msg):
@@ -38,60 +36,6 @@ def _stderr_log(msg):
     output; tests pass a no-op to suppress noise.
     """
     print(msg, file=sys.stderr)
-
-
-def load_amender(spec):
-    """Resolve a TOML ``amend-r`` spec to a callable.
-
-    Two forms are supported:
-
-    * ``module.path:function_name`` — imports ``module.path`` and returns
-      its ``function_name`` attribute. Useful when the amender ships with
-      a Python package on PYTHONPATH (e.g. a Fluxion JGF helper).
-
-    * Anything without a ``:`` is treated as a filesystem path; the file
-      is loaded as a Python module and its ``amend`` callable is returned.
-      Useful for ad-hoc test amenders that don't warrant a package.
-
-    The returned callable should have signature ``amend(R, hwloc_xml=None) ->
-    R``. It is invoked from :meth:`FakeResources.amend_R` when set via the
-    ``amender`` constructor argument.
-
-    Raises :class:`RuntimeError` with a descriptive message on any failure
-    (file not found, import error, missing attribute), so configuration
-    mistakes surface clearly from the modprobe rc1 task rather than as a
-    generic ImportError.
-    """
-    if ":" in spec:
-        mod_name, fn_name = spec.split(":", 1)
-        try:
-            module = importlib.import_module(mod_name)
-        except ImportError as exc:
-            raise RuntimeError(
-                "[fake-resources] amend-r: failed to import "
-                f"module {mod_name!r}: {exc}"
-            )
-        if not hasattr(module, fn_name):
-            raise RuntimeError(
-                f"[fake-resources] amend-r: module {mod_name!r} "
-                f"has no attribute {fn_name!r}"
-            )
-        return getattr(module, fn_name)
-
-    # File-path form
-    path = os.path.expanduser(spec)
-    if not os.path.isfile(path):
-        raise RuntimeError(f"[fake-resources] amend-r: file not found: {path!r}")
-    try:
-        module = import_path(path)
-    except Exception as exc:
-        raise RuntimeError(f"[fake-resources] amend-r: failed to load {path!r}: {exc}")
-    if not hasattr(module, "amend"):
-        raise RuntimeError(
-            f"[fake-resources] amend-r: file {path!r} has no "
-            "'amend' callable at module scope"
-        )
-    return module.amend
 
 
 class FakeResources(abc.ABC):
@@ -294,16 +238,11 @@ class InjectFakeResources(FakeResources):
     * A callable, ready to invoke. Use this when the amender is defined in
       the same source file or pulled from a Python package the caller
       already imported.
-    * A string in one of two forms, resolved at construction time via
-      :func:`load_amender`:
-
-      - ``"module.path:function_name"`` — importlib loads ``module.path``
-        and looks up ``function_name``. Use this when the amender ships in
-        a package on PYTHONPATH.
-      - Anything without a colon is treated as a filesystem path; the file
-        is loaded as a Python module and its ``amend`` (literally that
-        name) attribute is used. Use this for ad-hoc test amenders or for
-        passing an amender from a modprobe config without packaging it.
+    * A string, resolved at construction time via
+      :func:`~flux.resource.amend.load_amender`, which accepts
+      ``"module.path:function_name"``, a path to a Python file containing
+      an ``amend`` callable, or a plain name such as ``TreePool`` that
+      selects ``flux.resource.<name>:amend``.
 
     The string forms are what the ``[fake-resources]`` ``amend-r`` TOML key in
     flux-config-fake-resources(5) accepts; the rc1 task forwards the TOML
