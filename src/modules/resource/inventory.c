@@ -1077,7 +1077,87 @@ error:
         flux_log_error (h, "error responding to expiration-update request");
 }
 
+static void amend_continuation (flux_future_t *f, void *arg)
+{
+    struct inventory *inv = arg;
+    const flux_msg_t *msg = flux_future_aux_get (f, "msg");
+
+    if (flux_future_get (f, NULL) < 0) {
+        if (flux_respond_error (inv->ctx->h, msg, errno, NULL) < 0)
+            flux_log_error (inv->ctx->h, "error responding to amend request");
+    }
+    else if (flux_respond (inv->ctx->h, msg, NULL) < 0)
+        flux_log_error (inv->ctx->h, "error responding to amend request");
+    flux_future_destroy (f);
+}
+
+/* Replace the opaque scheduling key in R, e.g. so a runtime task can add
+ * scheduler-specific data before the scheduler is loaded.  The response
+ * is sent once the amended R is committed to the KVS.
+ */
+static void resource_amend (flux_t *h,
+                            flux_msg_handler_t *mh,
+                            const flux_msg_t *msg,
+                            void *arg)
+{
+    struct inventory *inv = arg;
+    json_t *scheduling;
+    flux_future_t *f = NULL;
+    const char *errstr = NULL;
+
+    if (flux_request_unpack (msg, NULL, "{s:o}", "scheduling", &scheduling) < 0)
+        goto error;
+    if (inv->ctx->rank != 0) {
+        errno = ENOSYS;
+        errstr = "resource.amend is only available on rank 0";
+        goto error;
+    }
+    if (!json_is_object (scheduling)) {
+        errno = EPROTO;
+        errstr = "scheduling must be an object";
+        goto error;
+    }
+    if (!inv->R) {
+        errno = ENOENT;
+        errstr = "resources are not yet defined";
+        goto error;
+    }
+    if (acquire_clients (inv->ctx->acquire) > 0) {
+        errno = EBUSY;
+        errstr = "resources are busy (unload scheduler?)";
+        goto error;
+    }
+    /* R and R_stored are distinct top level objects (see inventory_put()),
+     * so the key is set in each.
+     */
+    if (json_object_set (inv->R, "scheduling", scheduling) < 0
+        || json_object_set (inv->R_stored, "scheduling", scheduling) < 0) {
+        errno = ENOMEM;
+        goto error;
+    }
+    if (!(f = inventory_put_R (inv))
+        || flux_future_aux_set (f,
+                                "msg",
+                                (void *)flux_msg_incref (msg),
+                                (flux_free_f)flux_msg_decref) < 0
+        || flux_future_then (f, -1., amend_continuation, inv) < 0) {
+        flux_msg_decref (msg);
+        flux_future_destroy (f);
+        goto error;
+    }
+    return;
+error:
+    if (flux_respond_error (h, msg, errno, errstr) < 0)
+        flux_log_error (h, "error responding to amend request");
+}
+
 static const struct flux_msg_handler_spec htab[] = {
+    {
+        FLUX_MSGTYPE_REQUEST,
+        "resource.amend",
+        resource_amend,
+        0
+    },
     {
         FLUX_MSGTYPE_REQUEST,
         "resource.reload",
