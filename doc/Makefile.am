@@ -395,7 +395,8 @@ MAN5_FILES_PRIMARY = \
 	man5/flux-config-policy.5 \
 	man5/flux-config-queues.5 \
 	man5/flux-config-heartbeat.5 \
-	man5/flux-config-fake-resources.5
+	man5/flux-config-fake-resources.5 \
+	man5/flux-config-sched.5
 
 
 MAN7_FILES = $(MAN7_FILES_PRIMARY)

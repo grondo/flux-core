@@ -45,14 +45,17 @@ hwloc-xml-path (optional)
 
 amend-r (optional)
    Reference to a Python callable that mutates the encoded R before it is
-   written to the KVS. Two forms are accepted:
+   written to the KVS. Three forms are accepted:
 
    * ``module.path:function_name`` — importlib loads the named module and
      looks up the function. Useful when the amender ships with a Python
      package on PYTHONPATH (e.g. a Fluxion JGF helper).
-   * Any value without a ``:`` is interpreted as a filesystem path; the
-     file is loaded as a Python module and its ``amend`` callable is used.
-     Useful when the amender is not available in an installed package.
+   * A path to a Python file, i.e. a value that contains ``/`` or ends in
+     ``.py``; the file is loaded as a Python module and its ``amend``
+     callable is used. Useful when the amender is not available in an
+     installed package.
+   * A plain name, which selects ``flux.resource.<name>:amend``, e.g.
+     ``TreePool``.
 
    The callable signature is ``amend(R, hwloc_xml=None) -> R``. Used to
    inject scheduler-specific metadata into R (e.g. Fluxion JGF keys,
@@ -119,13 +122,20 @@ The arguments are:
 
 The return value is what gets written to ``resource.R`` in the KVS.
 
-The ``amend-r`` config key accepts two forms:
+The ``amend-r`` config key accepts three forms:
 
 * ``module.path:function_name`` — the named module is imported and the
   named function is looked up. Use this when the amender ships in a Python
   package on PYTHONPATH.
-* Anything without a colon is treated as a filesystem path; the file is
-  loaded as a Python module and its top-level ``amend()`` function is used.
+* A path to a Python file (containing ``/`` or ending in ``.py``) — the
+  file is loaded as a Python module and its top-level ``amend()`` function
+  is used.
+* A plain name — ``flux.resource.<name>:amend`` is used.
+
+The same amenders may be used with ``sched.amend-r`` (see
+:man5:`flux-config-sched`) to amend the R of a Flux instance with
+real resources, such as one started by :man1:`flux-batch` or
+:man1:`flux-alloc`.
 
 A minimal example amender, suitable for the path form, that tags every R
 with a marker in the scheduling key:
