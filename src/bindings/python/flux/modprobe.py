@@ -1873,6 +1873,9 @@ class Modprobe:
             alternative. e.g. ``alternatives.sched = "sched-simple"``
         <name>: A table of updates for an individual module, e.g.
             ``feasibility.ranks = "0,1"``
+
+        Also process ``sched.module``, which selects the ``sched``
+        alternative.
         """
         modules_conf = self.handle.conf_get("modules", default={})
         for key, entry in modules_conf.items():
@@ -1881,6 +1884,15 @@ class Modprobe:
                     self.taskdb.set_alternative(service, name)
             else:
                 self.update_module(key, entry)
+
+        # sched.module is shorthand for modules.alternatives.sched, and
+        # takes precedence over it.
+        sched_module = self.handle.conf_get("sched.module")
+        if sched_module is not None:
+            try:
+                self.taskdb.set_alternative("sched", sched_module)
+            except ValueError as exc:
+                raise ValueError(f"sched.module: {exc}") from None
 
     def configure_modules(self):
         """
