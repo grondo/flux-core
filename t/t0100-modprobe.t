@@ -1496,6 +1496,43 @@ test_expect_success 'modprobe: alternatives config propagates to other provides'
 	test_debug "cat feas.conf.prop.json" &&
 	cat feas.conf.prop.json | jq -e ".name == \"basic-scheduler\""
 '
+test_expect_success 'modprobe: sched.module in broker config works' '
+	cat <<-EOF | flux config load &&
+	[sched]
+	module = "basic-scheduler"
+	EOF
+	test_when_finished "echo {} | flux config load" &&
+	FLUX_MODPROBE_PATH=$(pwd) \
+	    flux modprobe show sched > sched.module.json &&
+	cat sched.module.json | jq -e ".name == \"basic-scheduler\"" &&
+	FLUX_MODPROBE_PATH=$(pwd) \
+	    flux modprobe show feasibility > feas.module.json &&
+	cat feas.module.json | jq -e ".name == \"basic-scheduler\""
+'
+test_expect_success 'modprobe: sched.module overrides modules.alternatives.sched' '
+	cat <<-EOF | flux config load &&
+	[modules.alternatives]
+	sched = "sched-simple"
+	[sched]
+	module = "basic-scheduler"
+	EOF
+	test_when_finished "echo {} | flux config load" &&
+	FLUX_MODPROBE_PATH=$(pwd) \
+	    flux modprobe show sched > sched.override.json &&
+	cat sched.override.json | jq -e ".name == \"basic-scheduler\""
+'
+test_expect_success 'modprobe: sched.module detects invalid module' '
+	cat <<-EOF | flux config load &&
+	[sched]
+	module = "foo"
+	EOF
+	test_when_finished "echo {} | flux config load" &&
+	( export FLUX_MODPROBE_PATH=$(pwd) &&
+	  test_must_fail flux modprobe show sched > badmodule.out 2>&1
+	) &&
+	test_debug "cat badmodule.out" &&
+	grep "sched.module: no module foo provides sched" badmodule.out
+'
 test_expect_success 'remove temporary configuration' '
 	rm -rf modprobe.d
 '
