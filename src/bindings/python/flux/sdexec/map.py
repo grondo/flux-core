@@ -114,9 +114,12 @@ its constructor.
 import errno
 import math
 import re
+import sys
+from collections import Counter
 from pathlib import Path
 
 from flux.cli.argparse import FluxArgumentParser
+from flux.hostlist import Hostlist
 from flux.idset import IDset
 from flux.resource import ResourceSet
 
@@ -746,6 +749,142 @@ class HwlocMapper(ResourceMapper):
         return properties
 
 
+def _device_paths(properties):
+    """Return the set of device paths in a DeviceAllow property."""
+    entries = properties.get("DeviceAllow", "").split(",")
+    return {e.split()[0] for e in entries if e.strip()}
+
+
+def _gpu_device_nodes(pci_addrs):
+    """Return GPU device nodes on this node.
+
+    These are /dev/nvidia<N>, render nodes in the drm/ directory of each GPU
+    PCI device, and render nodes of KFD nodes. Spare render nodes of unused
+    AMD partitions are not included.
+    """
+    nodes = {str(p) for p in Path(DEV_PREFIX).glob("nvidia[0-9]*")}
+    for addr in filter(None, pci_addrs):
+        drm = Path(SYSFS_PCI_DEVICES) / addr / "drm"
+        nodes.update(str(Path(DEV_DRI) / p.name) for p in drm.glob("renderD*"))
+    nodes.update(str(Path(DEV_DRI) / f"renderD{n[2]}") for n in _kfd_nodes())
+    return {n for n in nodes if Path(n).exists()}
+
+
+def _sysfs_gpus():
+    """Return PCI addresses of devices bound to a GPU driver."""
+    addrs = []
+    for dev in Path(SYSFS_PCI_DEVICES).glob("*"):
+        try:
+            driver = (dev / "driver").resolve(strict=True).name.lower()
+        except OSError:
+            continue
+        if AMD_DRIVER in driver or NVIDIA_DRIVER in driver:
+            addrs.append(dev.name)
+    return sorted(addrs)
+
+
+def _compact(paths):
+    """Return paths as a compact string, e.g. /dev/dri/renderD[128-131]."""
+    hl = Hostlist(list(paths))
+    hl.sort()
+    return hl.encode() or "none"
+
+
+def selftest(mapper, pci_addrs, out, verbose=False):
+    """Check the GPU device mapping of a mapper on this node.
+
+    Map each GPU alone and all GPUs together. Check that:
+
+    - all allowed paths are device nodes
+    - each GPU device node is allowed for at most one GPU
+    - each GPU is allowed a GPU device node
+    - all GPUs together are allowed every device of each GPU
+    - every GPU device node on this node is allowed for some GPU
+
+    GPU device nodes are listed by :func:`_gpu_device_nodes`.
+
+    Args:
+        mapper: :class:`ResourceMapper` instance to check.
+        pci_addrs: PCI address of each GPU, indexed by GPU ID.
+        out: File object for the report.
+        verbose: If True, also print the devices of each GPU.
+
+    Returns:
+        Number of failed checks.
+    """
+    failures = 0
+    ngpus = len(pci_addrs)
+    errors = []
+
+    def report(ok, msg, details=()):
+        nonlocal failures
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {msg}", file=out)
+        for line in details:
+            print(f"     {line}", file=out)
+
+    def devices(gpus):
+        try:
+            return _device_paths(mapper.map(_build_R(gpus=gpus)))
+        except OSError as exc:
+            errors.append(f"gpu {gpus}: {exc}")
+            return set()
+
+    if ngpus == 0:
+        sysfs = _sysfs_gpus()
+        report(not sysfs, "no GPUs in topology or bound to a GPU driver", sysfs)
+        return failures
+
+    singles = {i: devices(str(i)) for i in range(ngpus)}
+    alldevs = devices(f"0-{ngpus - 1}")
+    msg = f"map {ngpus} GPUs one at a time and all together"
+    if errors:
+        report(False, msg, errors)
+        return failures
+    gpu_nodes = _gpu_device_nodes(set(pci_addrs))
+
+    if verbose:
+        # Show devices of all GPUs once, unless there is only one GPU
+        common = set.intersection(*singles.values()) if ngpus > 1 else set()
+        print(f"GPU device nodes ({len(gpu_nodes)}): {_compact(gpu_nodes)}", file=out)
+        print(f"allowed for every GPU: {_compact(common)}", file=out)
+        print(f"{'gpu':<4} {'pci':<12}  devices", file=out)
+        for gpu, devs in singles.items():
+            line = f"{gpu:<4} {pci_addrs[gpu]:<12}  {' '.join(sorted(devs - common))}"
+            print(line, file=out)
+
+    report(True, msg)
+
+    users = Counter(dev for devs in singles.values() for dev in devs)
+    bad = sorted(p for p in set(users) | alldevs if not _is_device_node(Path(p)))
+    report(not bad, "all allowed paths are device nodes", bad)
+
+    shared = sorted(
+        f"{dev}: gpus {IDset(g for g, devs in singles.items() if dev in devs)}"
+        for dev in gpu_nodes
+        if users[dev] > 1
+    )
+    report(not shared, "each GPU device node is allowed for at most one GPU", shared)
+
+    no_node = [str(g) for g, devs in singles.items() if not devs & gpu_nodes]
+    report(not no_node, "each GPU is allowed a GPU device node", no_node)
+
+    missing = set(users) - alldevs
+    report(
+        not missing,
+        "all GPUs together are allowed every single-GPU device",
+        sorted(missing),
+    )
+
+    unreachable = gpu_nodes - alldevs
+    report(
+        not unreachable,
+        "every GPU device node on this node is allowed for some GPU",
+        sorted(unreachable),
+    )
+    return failures
+
+
 def _build_R(cores=None, gpus=None):
     """Build a minimal R JSON string for rank 0 with the given resource IDs."""
     import subprocess
@@ -793,7 +932,6 @@ def main(args=None):
     """CLI entry point: show systemd unit properties for given resource IDs."""
     import importlib
     import json
-    import sys
 
     parser = FluxArgumentParser(
         prog="flux python -m flux.sdexec.map",
@@ -816,6 +954,17 @@ def main(args=None):
         metavar="CLASS",
         default=None,
         help="fully-qualified mapper class (default: flux.sdexec.map.HwlocMapper)",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="check the GPU device mapping against this node and exit",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="with --check, show the devices of each GPU",
     )
     parser.add_argument(
         "--allowed-devices",
@@ -845,6 +994,15 @@ def main(args=None):
     except ValueError as exc:
         raise SystemExit(f"--allowed-devices: {exc}")
     mapper = cls(xml)
+    if opts.check:
+        if opts.cores or opts.gpus or opts.allowed_devices:
+            raise SystemExit(
+                "--check cannot be used with --cores, --gpus, or --allowed-devices"
+            )
+        topo = mapper if isinstance(mapper, HwlocMapper) else HwlocMapper(xml)
+        failures = selftest(mapper, topo.gpu_addrs, sys.stdout, opts.verbose)
+        print("PASS" if failures == 0 else f"FAIL: {failures} checks failed")
+        return 1 if failures else 0
     R = _build_R(cores=opts.cores or None, gpus=opts.gpus or None)
     try:
         result = mapper.map(R)
@@ -858,6 +1016,4 @@ def main(args=None):
 
 
 if __name__ == "__main__":
-    import sys
-
     sys.exit(main())
