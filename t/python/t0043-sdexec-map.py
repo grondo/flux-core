@@ -18,6 +18,7 @@ import re
 import stat as stat_mod
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 from unittest.mock import patch
@@ -440,8 +441,7 @@ class TestAmdPartitionDevices(AmdPartitionFixture, unittest.TestCase):
     """DeviceAllow for MI300A in SPX, TPX, and CPX modes (issue #7905)."""
 
     def renders(self, result):
-        entries = result["DeviceAllow"].split(",")
-        return {e.split()[0] for e in entries if "renderD" in e}
+        return {p for p in m._device_paths(result) if "renderD" in p}
 
     def check_single_gpus(self, mode):
         mapper, render = self.setup_mode(mode)
@@ -528,6 +528,118 @@ class TestAmdPartitionEdgeCases(AmdPartitionFixture, unittest.TestCase):
         result = mapper.map_gpus("0")
         self.assertNotIn("renderD200", result["DeviceAllow"])
         self.assertIn(f"{render[0]} rw", result["DeviceAllow"].split(","))
+
+
+class TestSelftest(AmdPartitionFixture, unittest.TestCase):
+    """flux python -m flux.sdexec.map --check on a fake MI300A node."""
+
+    def setup_mode(self, mode):
+        # Fake device nodes are regular files
+        patcher = patch.object(m, "_is_device_node", lambda p: p.exists())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return super().setup_mode(mode)
+
+    def run_check(self, mode, *args):
+        self.setup_mode(mode)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            ret = m.main(["--check", f"--xml={HWLOC_DATA}/tuo.{mode}.xml", *args])
+        return ret, out.getvalue()
+
+    def test_check_passes(self):
+        for mode, nparts in self.MODES.items():
+            ret, out = self.run_check(mode)
+            self.assertEqual(ret, 0, out)
+            self.assertNotIn("FAIL", out)
+            ngpus = self.APUS * nparts
+            self.assertIn(f"ok   map {ngpus} GPUs one at a time and all together", out)
+
+    def test_check_detects_shared_render_node(self):
+        """--check fails with the PCI drm/ lookup used before issue #7905."""
+
+        def old_lookup(self, pci_path, partitions):
+            return self._discover_drm_devices(pci_path)
+
+        with patch.object(HwlocMapper, "_discover_amd_drm_devices", old_lookup):
+            ret, out = self.run_check("CPX")
+        self.assertEqual(ret, 1)
+        self.assertIn("FAIL each GPU device node is allowed for at most one GPU", out)
+        self.assertIn("renderD128: gpus 0-5", out)
+        self.assertIn("FAIL every GPU device node", out)
+        self.assertIn("renderD129", out)
+
+    def test_check_detects_missing_device(self):
+        mapper, render = self.setup_mode("TPX")
+        Path(render[4]).unlink()
+        out = io.StringIO()
+        self.assertGreater(m.selftest(mapper, mapper.gpu_addrs, out), 0)
+        self.assertIn("FAIL map 12 GPUs", out.getvalue())
+
+    def test_check_detects_unreachable_node(self):
+        """A GPU render node in KFD topology allowed for no GPU fails."""
+        mapper, render = self.setup_mode("SPX")
+        (Path(m.DEV_DRI) / "renderD200").touch()
+        node = Path(m.SYSFS_KFD_NODES) / "99"
+        node.mkdir()
+        (node / "properties").write_text(
+            "domain 9\nlocation_id 512\ndrm_render_minor 200\n"
+        )
+        out = io.StringIO()
+        self.assertEqual(m.selftest(mapper, mapper.gpu_addrs, out), 1)
+        self.assertIn("renderD200", out.getvalue())
+
+    def test_check_verbose(self):
+        """--check -v shows the render node of each partition."""
+        ret, out = self.run_check("CPX", "-v")
+        self.assertEqual(ret, 0, out)
+        lines = out.splitlines()
+        self.assertTrue(lines[0].startswith("GPU device nodes"), out)
+        dri = m.DEV_DRI
+        self.assertIn(
+            f"GPU device nodes (24): {dri}/renderD" "[128-133,136-141,144-149,152-157]",
+            lines,
+        )
+        self.assertIn(f"allowed for every GPU: {m.DEV_PREFIX}/kfd", lines)
+        rows = {
+            int(line.split()[0]): line.split()[1:]
+            for line in lines
+            if line[:1].isdigit()
+        }
+        self.assertEqual(len(rows), 24)
+        for gpu, row in rows.items():
+            minor = 128 + 8 * (gpu // 6) + gpu % 6
+            self.assertEqual(row, [f"{gpu // 6:04x}:02:00.0", f"{dri}/renderD{minor}"])
+
+    def test_check_detects_overgrant(self):
+        """--check fails if a GPU is allowed render nodes of other GPUs."""
+        mapper, render = self.setup_mode("SPX")
+        map_gpus = HwlocMapper.map_gpus
+
+        def overgrant(self, gpus):
+            return map_gpus(self, "0-3")
+
+        out = io.StringIO()
+        with patch.object(HwlocMapper, "map_gpus", overgrant):
+            self.assertGreater(m.selftest(mapper, mapper.gpu_addrs, out), 0)
+        self.assertIn(
+            "FAIL each GPU device node is allowed for at most one GPU", out.getvalue()
+        )
+
+    def test_check_no_gpus(self):
+        """No GPUs passes only if sysfs has no GPUs."""
+        self.setup_mode("SPX")
+        out = io.StringIO()
+        self.assertEqual(m.selftest(None, [], out), 1)
+        self.assertIn("FAIL no GPUs in topology", out.getvalue())
+        with patch.object(m, "SYSFS_PCI_DEVICES", str(self.root / "none")):
+            self.assertEqual(m.selftest(None, [], io.StringIO()), 0)
+
+    def test_check_with_other_options_is_error(self):
+        with patch.object(m, "_get_system_xml", return_value=HWLOC_XML):
+            for opt in ("--gpus=0", "--cores=0", "--allowed-devices=/dev/null"):
+                with self.assertRaises(SystemExit):
+                    m.main(["--check", opt])
 
 
 class TestCustomGpuMapper(unittest.TestCase):
