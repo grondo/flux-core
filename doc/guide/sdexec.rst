@@ -251,6 +251,33 @@ DevicePolicy
    while blocking access to physical devices unless explicitly allowed
    via DeviceAllow.
 
+Checking the Mapping
+====================
+
+``flux python -m flux.sdexec.map`` shows the properties that the mapper
+emits for resource IDs on the local node, for example
+``--cores=0-3 --gpus=0``. With ``--check``, it maps each GPU alone and all
+GPUs together, and checks that:
+
+- all allowed paths are device nodes
+- each GPU device node is allowed for at most one GPU
+- each GPU is allowed a GPU device node
+- all GPUs together are allowed every device of each GPU
+- every GPU device node on the node is allowed for some GPU
+
+GPU device nodes are ``/dev/nvidia<N>`` and the DRM render nodes of GPUs.
+If hwloc finds no GPUs, the check fails if a PCI device is bound to a GPU
+driver.
+
+It prints one line per check and exits nonzero if a check fails. With
+``-v``, it also prints the PCI address and devices of each GPU, for
+comparison with vendor tools. It does not need a Flux instance or
+privileges, but it must run outside a job with constrained devices. Run it
+on new hardware or after the GPU partition mode changes. Use ``--mapper``
+to check a custom mapper class. ``--check`` does not show that the allowed
+devices are sufficient to run GPU code, or that GPU *N* is the GPU that
+the vendor runtime calls *N*. Run a job for that.
+
 Module Statistics
 =================
 
