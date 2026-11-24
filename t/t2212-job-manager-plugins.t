@@ -106,9 +106,12 @@ test_expect_success 'job-manager: bad plugins config is detected' '
 	[[job-manager.plugins]]
 	load = "notfound.so"
 	EOF
-	test_must_fail \
-	    flux bulksubmit -n1 --watch --log=badconf.{}.log \
-	        flux start -c$(pwd)/badconf/{} true ::: a b c d &&
+	test_when_finished "tail -n+1 badconf.?.log" &&
+	test_expect_code 1 \
+	    flux bulksubmit -n1 -t 2m --watch --log=badconf.{}.log \
+	        flux start -c$(pwd)/badconf/{} \
+	            -Slog-stderr-level=6 -Slog-stderr-mode=local \
+	            true ::: a b c d &&
 	test_debug "echo a:; cat badconf.a.log" &&
 	grep "config must be an array" badconf.a.log &&
 	test_debug "echo b:; cat badconf.b.log" &&
