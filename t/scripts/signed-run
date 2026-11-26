@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+#  Usage: signed-run [flux-run OPTIONS] COMMAND...
+#
+#  Like flux run, but sign J with the default signing mechanism from the
+#  flux-security configuration, as a guest's J is signed. The instance
+#  owner's J is otherwise signed with mech=none, which the job shell
+#  rejects for guest jobs unless it is an allowed mechanism. Use this to
+#  run a guest job in a test instance, e.g. one started with
+#  FLUX_IMP_EXEC_USERID set to another userid.
+#
+#  Without flux-security, this is the same as flux run.
+#
+#  See also test_have_guest_signing in flux-sharness.sh.
+#
+sign_py='
+import sys
+from flux.security import SecurityContext
+print(SecurityContext().sign_wrap(sys.stdin.read()).decode())
+'
+if ! flux version | grep -q libflux-security; then
+    exec flux run "$@"
+fi
+jobspec=$(flux run --dry-run "$@") || exit 1
+J=$(printf "%s" "$jobspec" | flux python -c "$sign_py") || exit 1
+id=$(printf "%s" "$J" | flux job submit --flags=signed) || exit 1
+exec flux job attach $id

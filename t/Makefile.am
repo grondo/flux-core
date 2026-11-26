@@ -491,6 +491,7 @@ dist_check_SCRIPTS = \
 	scripts/t0004-event-helper.sh \
 	scripts/tssh \
 	scripts/sign-as.py \
+	scripts/signed-run \
 	scripts/runpty.py \
 	scripts/dmesg-grep.py \
 	scripts/stats-listen.py \

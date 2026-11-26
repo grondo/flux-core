@@ -318,6 +318,18 @@ test_columns_variable_preserved() {
 	test "$cols" = "12"
 }
 
+#  Return success if signed-run(1) can sign J with the default signing
+#  mechanism, i.e. jobs run with it are accepted as guest jobs.
+#  Always succeeds if flux is not built with flux-security.
+#
+#  Usage: test_have_guest_signing && test_set_prereq GUEST_SIGNING
+#
+test_have_guest_signing() {
+    flux version | grep -q libflux-security || return 0
+    flux python -c "from flux.security import SecurityContext as S; \
+        c = S(); c.sign_unwrap(c.sign_wrap(b'x'))" >/dev/null 2>&1
+}
+
 #  flux-security version check. If flux is built with flux-security,
 #  check that version >= x.y.z:
 #
