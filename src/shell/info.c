@@ -23,24 +23,41 @@
 
 #include "src/common/libutil/read_all.h"
 #include "src/common/librlist/rhwloc.h"
+#include "src/common/libjob/unwrap.h"
 #include "ccan/str/str.h"
 
 #include "internal.h"
 #include "info.h"
 #include "jobspec.h"
 
+/* Unwrap and verify J. Jobs of the instance owner are signed with
+ * mech=none, which may not be in the configured allowed types, so only
+ * enforce allowed types for other users.
+ */
+static char *unwrap_J (flux_shell_t *shell,
+                       const char *J,
+                       uint32_t *userid,
+                       flux_error_t *error)
+{
+    if (getuid () == shell->broker_owner)
+        return flux_unwrap_string (J, true, userid, error);
+    return unwrap_string_verify_allowed (J, userid, error);
+}
+
 /* Get jobspec from job-info.lookup future and assign.
  * Return 0 on success, -1 on failure (and log error).
  * N.B. assigned values remain valid until future is destroyed.
  */
-static int lookup_jobspec_get (flux_future_t *f, char **jobspec)
+static int lookup_jobspec_get (flux_shell_t *shell,
+                               flux_future_t *f,
+                               char **jobspec)
 {
     flux_error_t error;
     const char *J;
     uint32_t userid;
     if (flux_rpc_get_unpack (f, "{s:s}", "J", &J) < 0)
         goto error;
-    if (!(*jobspec = flux_unwrap_string (J, true, &userid, &error))) {
+    if (!(*jobspec = unwrap_J (shell, J, &userid, &error))) {
         shell_log_error ("failed to unwrap J: %s", error.text);
         return -1;
     }
@@ -174,7 +191,7 @@ static int shell_init_jobinfo (flux_shell_t *shell, struct shell_info *info)
             goto out;
         }
     }
-    if (lookup_jobspec_get (f_info, &jobspec) < 0) {
+    if (lookup_jobspec_get (shell, f_info, &jobspec) < 0) {
         shell_log_error ("error fetching jobspec");
         goto out;
     }

@@ -404,6 +404,9 @@ test_expect_success GUEST_SIGNING,FLUX_SECURITY \
 #  FLUX_IMP_EXEC_USERID when the IMP sets it, since an instance running
 #  as another user cannot be trusted to report it.  Set the variable in
 #  the environment of a test instance to stand in for the IMP.
+#
+#  When this differs from the shell userid, the job is a guest job, so
+#  run it with signed-run so J is signed like a real guest job.
 test_expect_success 'job-shell: create instance_owner userrc' '
 	cat <<-EOF >owner.lua
 	plugin.register {
@@ -424,9 +427,11 @@ test_expect_success 'job-shell: instance_owner is security.owner by default' '
 	test_debug "cat owner.out" &&
 	grep "instance_owner=$(id -u)" owner.out
 '
-test_expect_success 'job-shell: FLUX_IMP_EXEC_USERID overrides security.owner' '
+test_expect_success GUEST_SIGNING \
+	'job-shell: FLUX_IMP_EXEC_USERID overrides security.owner' '
 	FLUX_IMP_EXEC_USERID=4242 \
-	    flux start flux run -o userrc=owner.lua true >owner-imp.out 2>&1 &&
+	    flux start signed-run -o userrc=owner.lua true \
+	    >owner-imp.out 2>&1 &&
 	test_debug "cat owner-imp.out" &&
 	grep "instance_owner=4242" owner-imp.out
 '
