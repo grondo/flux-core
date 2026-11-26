@@ -407,6 +407,9 @@ test_expect_success GUEST_SIGNING,FLUX_SECURITY \
 #
 #  When this differs from the shell userid, the job is a guest job, so
 #  run it with signed-run so J is signed like a real guest job.
+flux python -c "from flux.security import SecurityContext as S; \
+    c = S(); c.sign_unwrap(c.sign_wrap(b'x', mech_type='none'))" \
+    >/dev/null 2>&1 || test_set_prereq NONE_DISALLOWED
 test_expect_success 'job-shell: create instance_owner userrc' '
 	cat <<-EOF >owner.lua
 	plugin.register {
@@ -448,5 +451,12 @@ test_expect_success 'job-shell: empty FLUX_IMP_EXEC_USERID is fatal' '
 	test_debug "cat owner-empty.out" &&
 	grep "error parsing FLUX_IMP_EXEC_USERID=" owner-empty.out &&
 	test_must_fail grep "instance_owner=" owner-empty.out
+'
+test_expect_success FLUX_SECURITY,NONE_DISALLOWED \
+	'job-shell: guest J signed with disallowed mechanism is rejected' '
+	test_must_fail env FLUX_IMP_EXEC_USERID=$(($(id -u)+1)) \
+	    flux start flux run true >mech-guest.out 2>&1 &&
+	test_debug "cat mech-guest.out" &&
+	grep "failed to unwrap J:.*mechanism=none not allowed" mech-guest.out
 '
 test_done
