@@ -430,18 +430,18 @@ test_expect_success 'job-shell: FLUX_IMP_EXEC_USERID overrides security.owner' '
 	test_debug "cat owner-imp.out" &&
 	grep "instance_owner=4242" owner-imp.out
 '
-test_expect_success 'job-shell: malformed FLUX_IMP_EXEC_USERID is an error' '
-	FLUX_IMP_EXEC_USERID=bogus \
+test_expect_success 'job-shell: malformed FLUX_IMP_EXEC_USERID is fatal' '
+	test_must_fail env FLUX_IMP_EXEC_USERID=bogus \
 	    flux start flux run -o userrc=owner.lua true >owner-bad.out 2>&1 &&
 	test_debug "cat owner-bad.out" &&
 	grep "error parsing FLUX_IMP_EXEC_USERID=bogus" owner-bad.out &&
-	grep "instance_owner=0" owner-bad.out
+	test_must_fail grep "instance_owner=" owner-bad.out
 '
-test_expect_success 'job-shell: empty FLUX_IMP_EXEC_USERID is an error' '
-	FLUX_IMP_EXEC_USERID= \
+test_expect_success 'job-shell: empty FLUX_IMP_EXEC_USERID is fatal' '
+	test_must_fail env FLUX_IMP_EXEC_USERID= \
 	    flux start flux run -o userrc=owner.lua true >owner-empty.out 2>&1 &&
 	test_debug "cat owner-empty.out" &&
 	grep "error parsing FLUX_IMP_EXEC_USERID=" owner-empty.out &&
-	grep "instance_owner=0" owner-empty.out
+	test_must_fail grep "instance_owner=" owner-empty.out
 '
 test_done

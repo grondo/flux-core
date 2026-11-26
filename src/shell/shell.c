@@ -290,10 +290,9 @@ static uid_t get_instance_owner (flux_t *h)
     uid_t id;
 
     if ((s = getenv ("FLUX_IMP_EXEC_USERID"))) {
-        if (parse_userid (s, &id) == 0)
-            return id;
-        shell_log_error ("error parsing FLUX_IMP_EXEC_USERID=%s", s);
-        return (uid_t) 0;
+        if (parse_userid (s, &id) < 0)
+            shell_die (1, "error parsing FLUX_IMP_EXEC_USERID=%s", s);
+        return id;
     }
     if (!(s = flux_attr_get (h, "security.owner"))) {
         shell_log_errno ("error fetching security.owner attribute");
