@@ -21,6 +21,13 @@ char *unwrap_string_sign_none (const char *s,
                                uint32_t *userid,
                                flux_error_t *errp);
 
+/*  Like flux_unwrap_string() with verify=true, but only accept signing
+ *  mechanisms in the flux-security sign.allowed-types configuration.
+ */
+char *unwrap_string_verify_allowed (const char *s,
+                                    uint32_t *userid,
+                                    flux_error_t *errp);
+
 #endif /* !_UNWRAP_STRING */
 
 /*

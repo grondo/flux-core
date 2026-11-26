@@ -62,19 +62,20 @@ out:
     return result;
 }
 
-char *flux_unwrap_string (const char *s,
-                          bool verify,
-                          uint32_t *userid,
-                          flux_error_t *errp)
-{
 #if HAVE_FLUX_SECURITY
+static char *unwrap_string (const char *s,
+                            int flags,
+                            bool anymech,
+                            uint32_t *userid,
+                            flux_error_t *errp)
+{
     flux_security_t *sec;
     const void *data = NULL;
     char *result = NULL;
     int len;
     const char *mech;
     int64_t userid64;
-    int flags = verify ? 0 : FLUX_SIGN_NOVERIFY;
+    int rc;
 
     if (!(sec = flux_security_create (0))) {
         errprintf (errp,
@@ -88,13 +89,17 @@ char *flux_unwrap_string (const char *s,
                    flux_security_last_error (sec));
         goto done;
     }
-    if (flux_sign_unwrap_anymech (sec,
-                                  s,
-                                  &data,
-                                  &len,
-                                  &mech,
-                                  &userid64,
-                                  flags) < 0) {
+    if (anymech)
+        rc = flux_sign_unwrap_anymech (sec,
+                                       s,
+                                       &data,
+                                       &len,
+                                       &mech,
+                                       &userid64,
+                                       flags);
+    else
+        rc = flux_sign_unwrap (sec, s, &data, &len, &userid64, flags);
+    if (rc < 0) {
         errprintf (errp, "%s", flux_security_last_error (sec));
         goto done;
     }
@@ -111,8 +116,33 @@ char *flux_unwrap_string (const char *s,
 done:
     flux_security_destroy (sec);
     return result;
+}
+#endif /* HAVE_FLUX_SECURITY */
+
+char *flux_unwrap_string (const char *s,
+                          bool verify,
+                          uint32_t *userid,
+                          flux_error_t *errp)
+{
+#if HAVE_FLUX_SECURITY
+    return unwrap_string (s,
+                          verify ? 0 : FLUX_SIGN_NOVERIFY,
+                          true,
+                          userid,
+                          errp);
 #else
     return unwrap_string_sign_none (s, verify, userid, errp);
+#endif /* !HAVE_FLUX_SECURITY */
+}
+
+char *unwrap_string_verify_allowed (const char *s,
+                                    uint32_t *userid,
+                                    flux_error_t *errp)
+{
+#if HAVE_FLUX_SECURITY
+    return unwrap_string (s, 0, false, userid, errp);
+#else
+    return unwrap_string_sign_none (s, true, userid, errp);
 #endif /* !HAVE_FLUX_SECURITY */
 }
 
