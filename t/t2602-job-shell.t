@@ -385,6 +385,21 @@ test_expect_success 'job-shell: rexec-shutdown-timeout catches bad values' '
 	test_must_fail flux run -o rexec-shutdown-timeout=1 true &&
 	test_must_fail flux run -o rexec-shutdown-timeout=1.1f true
 '
+flux version | grep -q libflux-security && test_set_prereq FLUX_SECURITY
+test_have_guest_signing && test_set_prereq GUEST_SIGNING
+test_expect_success GUEST_SIGNING 'job-shell: signed-run runs a job' '
+	signed-run -n1 echo hello >signed-run.out &&
+	test "$(cat signed-run.out)" = "hello"
+'
+test_expect_success GUEST_SIGNING,FLUX_SECURITY \
+	'job-shell: signed-run does not sign J with mech=none' '
+	signed-run -n1 true &&
+	flux job info $(flux job last) J | cut -d. -f1 | base64 -d \
+	    >signed-run.header &&
+	test_debug "cat -v signed-run.header" &&
+	grep -a mechanism signed-run.header &&
+	test_must_fail grep -a "mechanism.none" signed-run.header
+'
 #  The shell takes the owner of the enclosing instance from
 #  FLUX_IMP_EXEC_USERID when the IMP sets it, since an instance running
 #  as another user cannot be trusted to report it.  Set the variable in
